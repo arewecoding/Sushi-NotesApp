@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-ssr
+*.local
+.svelte-kit
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Rust/Tauri build artifacts
+/target/
+
+# OS files
+Thumbs.db
+
+# Python embedded runtime (large files, should be downloaded)
+src-tauri/resources/python-*
+
+# Lock files for development (keep for reproducible builds)
+# Uncomment if you don't want to track lock files:
+# pnpm-lock.yaml
+# uv.lock
+# Cargo.lock

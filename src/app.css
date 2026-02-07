@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+:root {
+  font-family: monospace;
+  /* TUI vibe */
+  background-color: #171717;
+  /* neutral-900 */
+  color: #f5f5f5;
+  /* neutral-100 */
+}
