@@ -4,7 +4,13 @@ from pathlib import Path  # NECESSARY CHANGE: Added for safe path handling
 import json
 
 # --- Architecture Imports ---
-from sushi.filesys import VaultWatcher, update_note, create_new_note
+from sushi.filesys import (
+    VaultWatcher,
+    update_note,
+    create_new_note,
+    get_note_filepath,
+    extract_short_id,
+)
 from sushi.note_schema import JNote
 from sushi.block_factory import BlockFactory
 from sushi.cache_db import FileIndex, NoteMetadata
@@ -146,7 +152,14 @@ class ActiveNote:
             )
             return
 
-        file_path = meta.note_dir / f"{self.note_id}.jnote"
+        file_path = get_note_filepath(self.service.db, self.note_id)
+        if not file_path:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Cannot derive filepath for note: {self.note_id}",
+            )
+            return
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
@@ -198,7 +211,9 @@ class ActiveNote:
         if not meta:
             return
 
-        file_path = meta.note_dir / f"{self.note_id}.jnote"
+        file_path = get_note_filepath(self.service.db, self.note_id)
+        if not file_path:
+            return
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
@@ -329,15 +344,20 @@ class ActiveNote:
         if not self.is_dirty or not self.note_obj:
             return
 
-        new_mtime = update_note(self.service.db, self.note_obj)
-        if new_mtime:
-            self._last_save_mtime = new_mtime
-            self.is_dirty = False
-            sys_log.log(
-                LogSource.SYSTEM,
-                LogLevel.INFO,
-                f"Auto-saved: {self.note_obj.metadata.title}",
-            )
+        # Guard: tell VaultService we're saving so watchdog events are suppressed
+        self.service._saving_note_ids.add(self.note_id)
+        try:
+            new_mtime = update_note(self.service.db, self.note_obj)
+            if new_mtime:
+                self._last_save_mtime = new_mtime
+                self.is_dirty = False
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.INFO,
+                    f"Auto-saved: {self.note_obj.metadata.title}",
+                )
+        finally:
+            self.service._saving_note_ids.discard(self.note_id)
 
     def close(self):
         # Flush any pending save
@@ -373,6 +393,9 @@ class VaultService:
 
         # Active Notes Registry
         self._active_notes: Dict[str, ActiveNote] = {}
+
+        # Guard: note_ids currently being saved (suppress watchdog events)
+        self._saving_note_ids: set = set()
 
         # Wire up the event handler
         self.watcher.handler.db = self.db
@@ -412,25 +435,55 @@ class VaultService:
         path = Path(path_str)
 
         # Determine event type from mtime
-        # mtime=0 means the file was deleted (set by VaultEventHandler.on_deleted)
+        # mtime=0 means file was deleted, mtime=-1 means file was moved/renamed
         if mtime == 0.0:
             event_type = "deleted"
+        elif mtime == -1.0:
+            event_type = "moved"
         elif path.exists():
             event_type = "modified"
         else:
             event_type = "created"
 
-        # If it's a directory or non-note file, update file tree
+        # If it's a directory or non-note file, always update file tree
         if path.is_dir() or path.suffix != ".jnote":
             self.file_tree.handle_structure_change(path_str, event_type)
             return
 
-        # For note files, also trigger tree update so sidebar refreshes
-        self.file_tree.handle_structure_change(path_str, event_type)
+        # --- Note file event handling ---
+        # Find the corresponding ActiveNote for echo suppression
+        is_echo = False
+        note_id = None
+        short_id = extract_short_id(path.name)
 
-        # If it's a note file, notify the corresponding ActiveNote
-        note_id = path.stem
-        if note_id in self._active_notes:
+        if short_id:
+            matches = self.db.get_metadata_by_short_id(short_id, str(path.parent))
+            if len(matches) == 1:
+                note_id = matches[0].note_id
+                if note_id in self._active_notes:
+                    active_note = self._active_notes[note_id]
+                    if (
+                        active_note._last_save_mtime
+                        and abs(mtime - active_note._last_save_mtime) < 0.1
+                    ):
+                        is_echo = True
+
+        if is_echo:
+            return  # Self-save echo — skip everything
+
+        # Structural changes (created/deleted/moved) update the tree.
+        # Content modifications on existing notes do NOT.
+        if event_type in ("created", "deleted", "moved"):
+            self.file_tree.handle_structure_change(path_str, event_type)
+
+        # Notify the ActiveNote of genuine external content changes only
+        # Skip if we're actively saving this note (race with watchdog)
+        if (
+            event_type == "modified"
+            and note_id
+            and note_id in self._active_notes
+            and note_id not in self._saving_note_ids
+        ):
             self._active_notes[note_id].handle_external_update(mtime)
 
     # ==========================================

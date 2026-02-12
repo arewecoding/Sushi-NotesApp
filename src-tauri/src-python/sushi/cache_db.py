@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Union
 from sushi.logger_service import sys_log, LogSource, LogLevel
 
@@ -117,6 +117,22 @@ class FileIndex:
             )
             for row in rows
         ]
+
+    def get_metadata_by_short_id(
+        self, short_id: str, directory: str
+    ) -> List[NoteMetadata]:
+        """
+        Find notes whose UUID starts with short_id in a specific directory.
+        Returns a list — caller must handle collisions (0 or >1 matches).
+        """
+        cursor = self.conn.cursor()
+        # Normalize directory path for comparison
+        norm_dir = str(Path(directory).resolve())
+        rows = cursor.execute(
+            "SELECT * FROM notes WHERE note_id LIKE ? AND note_dir = ?",
+            (f"{short_id}%", norm_dir),
+        ).fetchall()
+        return [NoteMetadata(**dict(row)) for row in rows]
 
     # =====================
     # WRITE (From Watcher)

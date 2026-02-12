@@ -13,6 +13,7 @@
     } from "../../../client/_apiTypes";
     import { loadNote, activeNoteId } from "$lib/stores/notesStore";
     import { addToast } from "$lib/stores/toastStore";
+    import { expandedDirs, toggleDir, treeVersion } from "$lib/stores/fileTreeStore";
 
     interface Props {
         path: string | null;
@@ -22,11 +23,16 @@
 
     let { path, name, isRoot = false }: Props = $props();
 
-    let isExpanded = $state(isRoot); // Root starts expanded
+    // Stable key for this directory in the expanded-dirs store
+    const dirKey = isRoot ? '__root__' : (path ?? '__root__');
+
     let isLoading = $state(false);
     let isLoaded = $state(false);
     let subdirs = $state<DirectoryItem[]>([]);
     let notes = $state<NoteListItem[]>([]);
+
+    // Derive expanded state from the persistent store
+    let isExpanded = $derived($expandedDirs.has(dirKey));
 
     async function fetchContents() {
         isLoading = true;
@@ -43,12 +49,13 @@
         }
     }
 
-    async function toggleExpand() {
+    function handleToggle() {
         if (!isExpanded && !isLoaded) {
-            // First time expanding - fetch contents
-            await fetchContents();
+            // First time expanding — fetch then toggle
+            fetchContents().then(() => toggleDir(dirKey));
+        } else {
+            toggleDir(dirKey);
         }
-        isExpanded = !isExpanded;
     }
 
     function handleNoteClick(noteId: string) {
@@ -58,7 +65,16 @@
     // Auto-load root on mount
     $effect(() => {
         if (isRoot && !isLoaded) {
-            toggleExpand();
+            fetchContents();
+        }
+    });
+
+    // Re-fetch data when treeVersion changes (structural change from backend)
+    // Only re-fetch if this node is expanded AND already loaded
+    $effect(() => {
+        const _v = $treeVersion; // track the dependency
+        if (isExpanded && isLoaded) {
+            fetchContents();
         }
     });
 </script>
@@ -69,7 +85,7 @@
         <button
             class="w-full flex items-center gap-1 text-sm text-neutral-400 px-2 py-1
              hover:bg-neutral-800 hover:text-neutral-200 cursor-pointer rounded text-left"
-            onclick={toggleExpand}
+            onclick={handleToggle}
         >
             {#if isLoading}
                 <Loader2 size={14} class="animate-spin flex-shrink-0" />
@@ -86,7 +102,7 @@
     <!-- Contents (subdirs + notes) -->
     {#if isExpanded || isRoot}
         <div class={isRoot ? "" : "pl-4"}>
-            {#if isLoading && isRoot}
+            {#if isLoading && isRoot && !isLoaded}
                 <div
                     class="flex items-center justify-center py-4 text-neutral-500"
                 >

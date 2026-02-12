@@ -6,7 +6,7 @@
     isSearchOpen,
   } from "$lib/stores/layout";
   import { createAndOpenNote } from "$lib/stores/notesStore";
-  import { treeVersion, refreshTree } from "$lib/stores/fileTreeStore";
+  import { refreshTree } from "$lib/stores/fileTreeStore";
   import FileTreeNode from "./FileTreeNode.svelte";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -101,9 +101,7 @@
 
     <!-- File Tree (keyed to force re-render on tree changes) -->
     <div class="flex-grow overflow-y-auto p-2">
-      {#key $treeVersion}
-        <FileTreeNode path={null} name="Vault" isRoot={true} />
-      {/key}
+      <FileTreeNode path={null} name="Vault" isRoot={true} />
     </div>
   </div>
 {/if}

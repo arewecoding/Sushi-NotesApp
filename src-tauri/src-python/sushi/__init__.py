@@ -323,7 +323,9 @@ async def delete_block(
 # ==========================================
 
 # Hardcoded vault path for now - can be made configurable later
-VAULT_PATH = Path("C:/Users/ADMIN/Development/PyTauri/project sushi sandbox-vault/")
+VAULT_PATH = Path(
+    "C:/Users/ADMIN/Development/PyTauri/test project/test_1/sushi/sample_notes/"
+)
 
 
 def setup(app_handle: AppHandle) -> None:

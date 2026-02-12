@@ -1,9 +1,10 @@
 import json
 import ijson
 import os
+import re
 import shutil
-import time
-from typing import Union, Callable, Optional, Dict, Any
+import uuid
+from typing import Union, Callable, Optional
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -12,6 +13,124 @@ from watchdog.events import FileSystemEventHandler
 from sushi.cache_db import FileIndex, NoteMetadata, DirectoryMetadata
 from sushi.note_schema import JNote
 from sushi.logger_service import sys_log, LogSource, LogLevel
+
+
+# ==========================================
+# File I/O Helpers
+# ==========================================
+
+
+def load_jnote(file_path: Path) -> Optional[JNote]:
+    """Reads a full JNote object from a .jnote file."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return JNote.from_dict(data, filepath=str(file_path))
+    except Exception as e:
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.ERROR,
+            f"Failed to load JNote from {file_path}: {e}",
+        )
+        return None
+
+
+def save_jnote(file_path: Path, note: JNote) -> None:
+    """Writes a JNote object to disk without updating timestamps."""
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(note.to_dict(), f, indent=2)
+    except Exception as e:
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.ERROR,
+            f"Failed to save JNote to {file_path}: {e}",
+        )
+
+
+# ==========================================
+# Filename Utilities
+# ==========================================
+
+SHORT_ID_LEN = 7
+MAX_SLUG_LEN = 50
+
+
+def slugify(text: str, max_len: int = MAX_SLUG_LEN) -> str:
+    """
+    Convert text to a filesystem-safe slug.
+    Lowercase, spaces → hyphens, strip illegal/special chars, truncate.
+    """
+    slug = text.lower().strip()
+    # Replace spaces and underscores with hyphens
+    slug = re.sub(r"[\s_]+", "-", slug)
+    # Remove anything that isn't alphanumeric or hyphen
+    slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    # Collapse multiple hyphens
+    slug = re.sub(r"-{2,}", "-", slug)
+    # Strip leading/trailing hyphens
+    slug = slug.strip("-")
+    # Truncate to max length (break at hyphen boundary if possible)
+    if len(slug) > max_len:
+        slug = slug[:max_len]
+        # Don't cut mid-word: trim back to last hyphen
+        last_hyphen = slug.rfind("-")
+        if last_hyphen > max_len // 2:
+            slug = slug[:last_hyphen]
+    return slug or "untitled"
+
+
+def generate_filename(title: str, note_id: str) -> str:
+    """
+    Generate a human-readable filename: {slug}-{short_id}.jnote
+    Example: 'my-cool-note-4f1139b.jnote'
+    """
+    slug = slugify(title)
+    short_id = note_id[:SHORT_ID_LEN]
+    return f"{slug}-{short_id}.jnote"
+
+
+def extract_short_id(filename: str) -> Optional[str]:
+    """
+    Parse the short ID (last 7 chars before .jnote) from a filename.
+    'my-cool-note-4f1139b.jnote' → '4f1139b'
+    """
+    stem = Path(filename).stem  # 'my-cool-note-4f1139b'
+    if len(stem) < SHORT_ID_LEN:
+        return None
+    short_id = stem[-SHORT_ID_LEN:]
+    # Validate it looks like a hex/uuid fragment
+    if re.match(r"^[a-f0-9]+$", short_id):
+        return short_id
+    return None
+
+
+def get_note_filepath(db: FileIndex, note_id: str) -> Optional[Path]:
+    """
+    Derive the full file path for a note from its DB metadata.
+    Uses generate_filename() based on the DB title. If the expected file
+    doesn't exist, falls back to a glob search by short ID.
+    """
+    meta = db.get_metadata(note_id)
+    if not meta:
+        return None
+    filename = generate_filename(meta.note_title, meta.note_id)
+    expected_path = meta.note_dir / filename
+
+    if expected_path.exists():
+        return expected_path
+
+    # Fallback: file may have a stale name — search by short ID
+    short_id = meta.note_id[:SHORT_ID_LEN]
+    for f in meta.note_dir.glob(f"*-{short_id}.jnote"):
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.DEBUG,
+            f"Filepath fallback: expected {filename}, found {f.name}",
+        )
+        return f
+
+    return expected_path  # Return expected path even if missing (caller handles error)
 
 
 # ==========================================
@@ -26,18 +145,22 @@ class VaultEventHandler(FileSystemEventHandler):
     """
 
     def __init__(self):
-        # These will be injected by VaultService
+        """
+        These will be injected by VaultService
+        """
         self.db: Optional[FileIndex] = None
         self.on_file_event_callback: Optional[Callable[[str, float], None]] = None
 
-    # Helper to extract metadata efficiently.
     def _get_note_meta(file_path: str):
+        """
+        Helper to extract metadata efficiently.
+        """
         return VaultWatcher.extract_note_metadata(Path(file_path))
 
-    #
-    #     Helper to safely fire the callback for ANY path (Note or Directory).
-    #
     def _notify_active_state(self, path: Path, mtime: float = None):
+        """
+        Helper to safely fire the callback for ANY path (Note or Directory)
+        """
         if not self.on_file_event_callback:
             return
 
@@ -56,10 +179,26 @@ class VaultEventHandler(FileSystemEventHandler):
                 LogSource.SYSTEM, LogLevel.ERROR, f"Callback failed for {path}: {e}"
             )
 
-    #
-    #     Common logic to Register/Update a note in DB and Notify ActiveState.
-    #
     def _process_note_file(self, file_path: Path):
+        """
+        Common logic to Register/Update a note in DB and Notify ActiveState.
+        Always runs identity resolution first to catch copies.
+        """
+        # Step 1: Resolve identity (move vs copy)
+        result = self._resolve_identity(file_path)
+        if result is True:
+            # COPY detected — file was renamed, watcher will pick up the new file
+            return
+        if result is None:
+            # Failed to read — skip processing entirely to avoid clobbering
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.WARNING,
+                f"Skipping note (unreadable): {file_path}",
+            )
+            return
+
+        # Step 2: Normal registration — identity is verified
         meta = VaultWatcher.extract_note_metadata(file_path)
         if meta:
             self.db.add_metadata(meta)
@@ -71,10 +210,87 @@ class VaultEventHandler(FileSystemEventHandler):
                 LogSource.SYSTEM, LogLevel.WARNING, f"Could not parse note: {file_path}"
             )
 
-        # Notify ActiveState about this file event (even if parse failed, it might fix itself)
+        # Notify ActiveState about this file event
         self._notify_active_state(file_path)
 
+    def _resolve_identity(self, file_path: Path) -> Optional[bool]:
+        """
+        Detects if a .jnote file at file_path is a MOVE or COPY.
+        Returns:
+            False  — Normal/Move, proceed with registration
+            True   — Copy detected, file renamed (skip processing)
+            None   — Failed to read file (skip processing entirely)
+        """
+        import time
+
+        # Retry up to 3 times with delay for Windows file locks
+        note = None
+        for attempt in range(3):
+            note = load_jnote(file_path)
+            if note is not None:
+                break
+            if attempt < 2:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.DEBUG,
+                    f"Retry {attempt + 1}/3 reading {file_path.name}...",
+                )
+                time.sleep(0.5)
+
+        if not note:
+            return None  # Unreadable after retries
+
+        current_path = str(file_path.resolve())
+        last_known = note.metadata.last_known_path
+
+        # Case A: Path matches or first time (no last_known_path yet)
+        if last_known is None or last_known == current_path:
+            if last_known is None:
+                # First time — stamp the path
+                note.metadata.last_known_path = current_path
+                save_jnote(file_path, note)
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.DEBUG,
+                    f"Stamped last_known_path on {file_path.name}",
+                )
+            return False
+
+        # Case B: Path mismatch — determine move vs copy
+        old_path = Path(last_known)
+
+        if not old_path.exists():
+            # Scenario 1: MOVE — old file is gone
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.INFO,
+                f"MOVE detected: {last_known} -> {current_path}",
+            )
+            note.metadata.last_known_path = current_path
+            save_jnote(file_path, note)
+            return False  # Keep UUID
+        else:
+            # Scenario 2: COPY — old file still exists at last_known_path
+            old_uuid = note.metadata.note_id
+            new_uuid = str(uuid.uuid4())
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.INFO,
+                f"COPY detected: Assigning new UUID {new_uuid} (was {old_uuid})",
+            )
+            note.metadata.note_id = new_uuid
+            new_name = generate_filename(note.metadata.title, new_uuid)
+            new_file = file_path.parent / new_name
+            note.metadata.last_known_path = str(new_file.resolve())
+            # Save with new identity, then rename to match
+            save_jnote(file_path, note)
+            file_path.rename(new_file)
+            return True  # Watcher will pick up the rename as a new event
+
     def on_created(self, event):
+        """
+        Updates DB and notifies ActiveState on file creation events.
+        """
         path = Path(event.src_path)
         sys_log.log(LogSource.SYSTEM, LogLevel.DEBUG, f"Created: {path}")
 
@@ -89,6 +305,9 @@ class VaultEventHandler(FileSystemEventHandler):
             self._process_note_file(path)
 
     def on_deleted(self, event):
+        """
+        Updates DB and notifies ActiveState on file deletion events.
+        """
         path = Path(event.src_path)
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Deleted event: {path}")
 
@@ -119,13 +338,51 @@ class VaultEventHandler(FileSystemEventHandler):
             # Notify ActiveFileTree of deletion
             self._notify_active_state(path, mtime=0.0)  # mtime 0 indicates deletion
         elif path.suffix == ".jnote":
-            # Extract note_id from the filename (assumes <uuid>.jnote format)
-            note_id = path.stem
-            self.db.delete_note(note_id)
+            # Extract short ID from the filename and look up in DB
+            short_id = extract_short_id(path.name)
+            if not short_id:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.WARNING,
+                    f"Could not extract short_id from: {path.name}",
+                )
+                return
+
+            matches = self.db.get_metadata_by_short_id(short_id, str(path.parent))
+
+            if len(matches) == 1:
+                # Safe — exactly one match
+                self.db.delete_note(matches[0].note_id)
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.INFO,
+                    f"Deleted note from DB: {matches[0].note_title}",
+                )
+            elif len(matches) > 1:
+                # COLLISION — do NOT delete, trigger rescan
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.WARNING,
+                    f"Short ID collision for '{short_id}' — {len(matches)} matches. Triggering rescan.",
+                )
+                # Rescan is handled by the VaultService via callback
+                if self.on_file_event_callback:
+                    self.on_file_event_callback("__RESCAN__", 0.0)
+                return
+            else:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.DEBUG,
+                    f"No DB match for deleted file: {path.name}",
+                )
+
             # Notify ActiveNote if it's open
             self._notify_active_state(path, mtime=0.0)
 
     def on_modified(self, event):
+        """
+        Updates DB and notifies ActiveState on file modification events.
+        """
         if event.is_directory:
             return  # Ignore directory modification events
         path = Path(event.src_path)
@@ -133,7 +390,10 @@ class VaultEventHandler(FileSystemEventHandler):
             self._process_note_file(path)
 
     def on_moved(self, event):
-        # Handles renames and moves
+        """
+        Updates DB and notifies ActiveState on file move events.
+        Also stamps last_known_path on the moved .jnote file.
+        """
         old_path = Path(event.src_path)
         new_path = Path(event.dest_path)
         sys_log.log(
@@ -144,9 +404,28 @@ class VaultEventHandler(FileSystemEventHandler):
             self.db.update_directory(str(old_path), str(new_path), new_path.name)
             self._notify_active_state(new_path)
         elif new_path.suffix == ".jnote":
-            # Treat as delete old + create new
-            self.db.delete_note(old_path.stem)
+            # Update last_known_path only if it doesn't already match
+            # (update_note drift-rename already stamps the correct path)
+            note = load_jnote(new_path)
+            if note:
+                resolved = str(new_path.resolve())
+                if note.metadata.last_known_path != resolved:
+                    note.metadata.last_known_path = resolved
+                    save_jnote(new_path, note)
+
+            # Delete old DB entry using short_id from old filename
+            old_short_id = extract_short_id(old_path.name)
+            if old_short_id:
+                old_matches = self.db.get_metadata_by_short_id(
+                    old_short_id, str(old_path.parent)
+                )
+                if len(old_matches) == 1:
+                    self.db.delete_note(old_matches[0].note_id)
+                # If >1 match (collision) or 0 matches, skip delete — rescan will fix
+
             self._process_note_file(new_path)
+            # Signal a structural move (mtime=-1) so tree updates
+            self._notify_active_state(new_path, mtime=-1.0)
 
 
 class VaultWatcher:
@@ -177,10 +456,10 @@ class VaultWatcher:
         self.observer.join()
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "Watcher stopped.")
 
-    #
-    #     Wipes (optionally) and rebuilds the DB index from disk.
-    #
     def scan(self, db: FileIndex):
+        """
+        Wipes (optionally) and rebuilds the DB index from disk.
+        """
         db.clear_all()
         sys_log.log(
             LogSource.SYSTEM, LogLevel.INFO, f"Scanning vault: {self.root_path}"
@@ -208,11 +487,11 @@ class VaultWatcher:
 
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "Initial scan complete.")
 
-    #
-    #     Efficiently reads just the 'metadata' key from the JSON using ijson.
-    #
     @staticmethod
     def extract_note_metadata(file_path: Path) -> Optional[NoteMetadata]:
+        """
+        Efficiently reads just the 'metadata' key from the JSON using ijson.
+        """
         try:
             with open(file_path, "rb") as f:
                 parser = ijson.items(f, "metadata", use_float=True)
@@ -235,16 +514,20 @@ class VaultWatcher:
 # ==========================================
 
 
-#
-#     Creates a JNote object, saves it to disk.
-#     Watcher will handle the DB update.
-#
 def create_new_note(base_dir: str, title: str = "Untitled Note") -> Optional[JNote]:
-    """Creates a new JNote and saves it to disk."""
+    """
+    Creates a new JNote and saves it to disk.
+    Uses human-readable filename: {slug}-{short_id}.jnote
+    Watcher will handle the DB update.
+    """
     try:
         note = JNote.create_new(title)
         note_id = note.metadata.note_id
-        file_path = Path(base_dir) / f"{note_id}.jnote"
+        filename = generate_filename(title, note_id)
+        file_path = Path(base_dir) / filename
+
+        # Stamp last_known_path before first save
+        note.metadata.last_known_path = str(file_path.resolve())
 
         # Save to disk
         with open(file_path, "w", encoding="utf-8") as f:
@@ -259,12 +542,12 @@ def create_new_note(base_dir: str, title: str = "Untitled Note") -> Optional[JNo
         return None
 
 
-#
-#     Overwrites the file on disk with the provided JNote object.
-#     RETURNS timestamp for Echo Suppression.
-#
 def update_note(db: FileIndex, note: JNote) -> Optional[float]:
-    """Updates a note on disk and returns the new mtime."""
+    """
+    Updates a note on disk and returns the new mtime.
+    Performs drift detection: if title changed, renames the file.
+    RETURNS timestamp for Echo Suppression.
+    """
     try:
         meta = db.get_metadata(note.metadata.note_id)
         if not meta:
@@ -275,13 +558,74 @@ def update_note(db: FileIndex, note: JNote) -> Optional[float]:
             )
             return None
 
-        file_path = meta.note_dir / f"{meta.note_id}.jnote"
+        # Find the ACTUAL file on disk (may have stale name)
+        actual_path = get_note_filepath(db, meta.note_id)
+        if not actual_path or not actual_path.exists():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Note file not found on disk for: {meta.note_id}",
+            )
+            return None
 
-        # Update the timestamp before saving
+        # Derive expected filename from the NEW title being saved
+        expected_filename = generate_filename(note.metadata.title, meta.note_id)
+        expected_path = meta.note_dir / expected_filename
+
+        # Update timestamp
         note.metadata.update_timestamp()
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(note.to_dict(), f, indent=2)
+        # Drift detection: actual filename != expected → save then rename
+        if actual_path.name != expected_filename:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.INFO,
+                f"Title drift: renaming {actual_path.name} -> {expected_filename}",
+            )
+
+            # Step 1: Save content with last_known_path pointing to CURRENT path
+            # This prevents _resolve_identity from seeing a phantom MOVE
+            note.metadata.last_known_path = str(actual_path.resolve())
+            with open(actual_path, "w", encoding="utf-8") as f:
+                json.dump(note.to_dict(), f, indent=2)
+
+            # Step 2: Rename with retry (watchdog may briefly hold the file)
+            import time
+
+            renamed = False
+            for attempt in range(5):
+                try:
+                    actual_path.rename(expected_path)
+                    renamed = True
+                    break
+                except OSError:
+                    if attempt < 4:
+                        time.sleep(0.2)
+
+            if renamed:
+                # Step 3: Update last_known_path in the renamed file
+                note.metadata.last_known_path = str(expected_path.resolve())
+                save_jnote(expected_path, note)
+                file_path = expected_path
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.INFO,
+                    f"Rename succeeded: {expected_filename}",
+                )
+            else:
+                # Rename failed — content is saved at actual path, that's OK
+                file_path = actual_path
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.WARNING,
+                    f"Rename failed after retries, saved at: {actual_path.name}",
+                )
+        else:
+            # No drift — save in place
+            file_path = actual_path
+            note.metadata.last_known_path = str(file_path.resolve())
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(note.to_dict(), f, indent=2)
 
         # Return the new modification time for echo suppression
         new_mtime = file_path.stat().st_mtime
@@ -297,11 +641,8 @@ def update_note(db: FileIndex, note: JNote) -> Optional[float]:
         return None
 
 
-#
-#     Deletes the file. Watcher handles DB cleanup.
-#
 def delete_note(db: FileIndex, note_id: str) -> bool:
-    """Deletes a note file from disk."""
+    """Deletes the file. Watcher handles DB cleanup."""
     try:
         meta = db.get_metadata(note_id)
         if not meta:
@@ -312,7 +653,7 @@ def delete_note(db: FileIndex, note_id: str) -> bool:
             )
             return False
 
-        file_path = meta.note_dir / f"{note_id}.jnote"
+        file_path = meta.note_dir / generate_filename(meta.note_title, note_id)
         if file_path.exists():
             file_path.unlink()
             sys_log.log(

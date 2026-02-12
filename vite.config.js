@@ -15,7 +15,7 @@ export default defineConfig(async () => ({
     strictPort: true,
     watch: {
       // 3. tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**", "**/.venv/**"],
+      ignored: ["**/src-tauri/**", "**/.venv/**", "**/*.jnote"],
     },
   },
 }));

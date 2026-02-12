@@ -66,6 +66,7 @@ class NoteMetadata:
     version: str = CURRENT_NOTE_VERSION
     status: int = 0  # 0 = Active, 1 = Archived, etc.
     tags: List[str] = field(default_factory=list)
+    last_known_path: Optional[str] = None  # For move vs copy detection
 
     def update_timestamp(self):
         # FIX: Use strftime to ensure valid Z format without double offsets
@@ -90,6 +91,7 @@ class NoteMetadata:
             version=data.get("version", CURRENT_NOTE_VERSION),
             status=data.get("status", 0),
             tags=data.get("tags", []),
+            last_known_path=data.get("last_known_path", None),
         )
 
 
