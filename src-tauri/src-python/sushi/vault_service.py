@@ -1,29 +1,37 @@
-import threading
-from typing import Dict, Optional, Any, Union
-from pathlib import Path  # NECESSARY CHANGE: Added for safe path handling
-import json
+"""
+Sushi Vault Service
+====================
+Core application state: VaultService (the brain), ActiveNote (open note state),
+and ActiveFileTree (navigation state).
+"""
 
-# --- Architecture Imports ---
+import threading
+import json
+from typing import Dict, Optional, Any, Union
+from pathlib import Path
+
+from sushi.watcher import VaultWatcher
 from sushi.filesys import (
-    VaultWatcher,
     update_note,
     create_new_note,
     get_note_filepath,
     extract_short_id,
 )
-from sushi.note_schema import JNote
-from sushi.block_factory import BlockFactory
+from sushi.note_schema import JNote, NoteBlock, create_block
 from sushi.cache_db import FileIndex, NoteMetadata
-from sushi.logger_service import sys_log, LogSource, LogLevel
-from sushi.ipc_models import PyTauriModel
+from sushi.logger import sys_log, LogSource, LogLevel
+from sushi.models import (
+    TreeChangedPayload,
+    NoteContentChangedPayload,
+    NoteDeletedPayload,
+)
 
-# PyTauri imports for event emission (type hints only to avoid import errors)
+# PyTauri imports (type hints + optional runtime)
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pytauri import AppHandle
 
-# Try to import Emitter at runtime, but don't fail on import
 try:
     from pytauri import Emitter, AppHandle as AppHandleType
 
@@ -34,34 +42,15 @@ except ImportError:
 
 
 # ==========================================
-# Event Payloads for Frontend
-# ==========================================
-
-
-class TreeChangedPayload(PyTauriModel):
-    """Payload for tree-changed event."""
-
-    changed_path: str
-    event_type: str  # 'created', 'deleted', 'moved'
-
-
-class NoteContentChangedPayload(PyTauriModel):
-    """Payload for note-content-changed event (external edits)."""
-
-    note_id: str
-
-
-# ==========================================
-# 1. Active File Tree (Navigation State)
+# Active File Tree (Navigation State)
 # ==========================================
 
 
 class ActiveFileTree:
     """
-    Manages the state of the navigation sidebar.
-    Currently, the 'Source of Truth' is the SQLite CacheDB.
-    This class listens for structural changes (Dir Created/Deleted)
-    and signals the Frontend to refresh the view via Tauri events.
+    Manages the navigation sidebar state.
+    Listens for structural changes (created/deleted/moved) and signals
+    the frontend to refresh via Tauri events.
     """
 
     def __init__(self, app_handle: Optional["AppHandle"] = None):
@@ -74,7 +63,7 @@ class ActiveFileTree:
 
     def handle_structure_change(self, path: str, event_type: str = "modified"):
         """
-        Called when a Directory is created, moved, or deleted.
+        Called when a file/directory is created, moved, or deleted.
         Emits a tree-changed event to the frontend.
         """
         self.needs_refresh = True
@@ -84,7 +73,6 @@ class ActiveFileTree:
             f"File tree changed: {path} ({event_type})",
         )
 
-        # Emit event to frontend
         if HAS_EMITTER and self._app_handle is not None:
             try:
                 Emitter.emit(
@@ -104,14 +92,14 @@ class ActiveFileTree:
 
 
 # ==========================================
-# 2. Active Note (Memory State)
+# Active Note (Memory State)
 # ==========================================
 
 
 class ActiveNote:
     """
     Represents a single open note in memory.
-    Uses strict JNote objects and the Filesys module for I/O.
+    Uses strict JNote objects and the filesys module for I/O.
     Implements 'Echo Suppression' to handle local vs external edits.
     """
 
@@ -121,7 +109,7 @@ class ActiveNote:
         self.note_obj: Optional[JNote] = None
         self.is_dirty = False
 
-        # Echo Suppression: When we save, we record the expected mtime.
+        # Echo Suppression: when we save, record the expected mtime.
         # If a watcher event arrives with that exact mtime, we ignore it.
         self._last_save_mtime: Optional[float] = None
 
@@ -131,7 +119,7 @@ class ActiveNote:
         self._SAVE_DELAY = 2.5  # seconds
 
         # Load the note immediately
-        self._load_from_disk_sync()
+        self._load_from_disk()
 
         sys_log.log(
             LogSource.SYSTEM, LogLevel.INFO, f"ActiveNote created for: {note_id}"
@@ -141,8 +129,8 @@ class ActiveNote:
     # Loading
     # ==========================================
 
-    # Initial blocking load.
-    def _load_from_disk_sync(self):
+    def _load_from_disk(self):
+        """Initial blocking load from disk."""
         meta = self.service.db.get_metadata(self.note_id)
         if not meta:
             sys_log.log(
@@ -181,10 +169,8 @@ class ActiveNote:
     # External Update Handling (Echo Suppression)
     # ==========================================
 
-    #
-    #     Called by VaultService when Watcher barks.
-    #
     def handle_external_update(self, event_mtime: float):
+        """Called by VaultService when the watcher detects an external change."""
         # Suppress if this is our own save echoing back
         if self._last_save_mtime and abs(event_mtime - self._last_save_mtime) < 0.1:
             sys_log.log(
@@ -192,7 +178,7 @@ class ActiveNote:
             )
             return
 
-        # It's an external change - trigger a hot swap
+        # External change — trigger a hot swap
         sys_log.log(
             LogSource.SYSTEM,
             LogLevel.INFO,
@@ -200,9 +186,8 @@ class ActiveNote:
         )
         self._trigger_hot_swap()
 
-    # Reloads data in a thread.
     def _trigger_hot_swap(self):
-        # Run reload in a background thread to not block
+        """Reloads data in a background thread."""
         thread = threading.Thread(target=self._perform_hot_swap, daemon=True)
         thread.start()
 
@@ -220,7 +205,6 @@ class ActiveNote:
             new_note = JNote.from_dict(raw_data, str(file_path))
 
             if new_note:
-                # Swap the data (atomic as possible)
                 old_title = self.note_obj.metadata.title if self.note_obj else "Unknown"
                 self.note_obj = new_note
                 self.is_dirty = False
@@ -255,15 +239,14 @@ class ActiveNote:
             sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Hot swap failed: {e}")
 
     # ==========================================
-    # Block Editing (Facade to BlockFactory)
+    # Block Editing
     # ==========================================
 
-    # Uses BlockFactory to append a new block.
     def add_block(self, block_type: str, **kwargs):
+        """Uses create_block to append a new block."""
         if not self.note_obj:
             return
-
-        new_block = BlockFactory.create(block_type, **kwargs)
+        new_block = create_block(block_type, **kwargs)
         self.note_obj.blocks.append(new_block)
         self.is_dirty = True
         self._schedule_save()
@@ -271,7 +254,6 @@ class ActiveNote:
     def update_block(self, block_id: str, new_data: Dict[str, Any]):
         if not self.note_obj:
             return
-
         for block in self.note_obj.blocks:
             if block.block_id == block_id:
                 block.data.update(new_data)
@@ -283,14 +265,13 @@ class ActiveNote:
     def delete_block(self, block_id: str):
         if not self.note_obj:
             return
-
         self.note_obj.blocks = [
             b for b in self.note_obj.blocks if b.block_id != block_id
         ]
         self.is_dirty = True
         self._schedule_save()
 
-    def update_content(self, title: str, blocks: list):
+    def update_content(self, title: str, blocks: list) -> bool:
         """
         Updates the entire note content (title and blocks).
         Called from frontend when user edits the note.
@@ -298,16 +279,12 @@ class ActiveNote:
         if not self.note_obj:
             return False
 
-        # Update title
         self.note_obj.metadata.title = title
         self.note_obj.metadata.update_timestamp()
 
-        # Update blocks - convert from dict list to NoteBlock objects
-        from sushi.note_schema import NoteBlock
-
+        # Convert from dict list to NoteBlock objects (handles camelCase from frontend)
         new_blocks = []
         for block_dict in blocks:
-            # Handle camelCase from frontend
             block_data = {
                 "block_id": block_dict.get("blockId") or block_dict.get("block_id"),
                 "type": block_dict.get("type"),
@@ -359,25 +336,23 @@ class ActiveNote:
         finally:
             self.service._saving_note_ids.discard(self.note_id)
 
-    def close(self):
-        # Flush any pending save
+    def close(self, skip_save: bool = False):
+        """Cancel pending timers. Flush save unless skip_save (e.g. file was deleted)."""
         if self._save_timer:
             self._save_timer.cancel()
-        if self.is_dirty:
+        if self.is_dirty and not skip_save:
             self._save_to_disk()
 
 
 # ==========================================
-# 3. Vault Service (The Brain)
+# Vault Service (The Brain)
 # ==========================================
-# NECESSARY CHANGE: Renamed StateManager to VaultService and removed Singleton for Dependency Injection
 
 
 class VaultService:
     """
-    The Single Source of Truth for the application.
-    It holds the Database, the File Watcher, and all Active Notes.
-    Replaces the old singleton StateManager.
+    The single source of truth for the application.
+    Holds the Database, the File Watcher, and all Active Notes.
     """
 
     def __init__(
@@ -386,12 +361,12 @@ class VaultService:
         self.vault_path = Path(vault_path)
         self._app_handle = app_handle
 
-        # Core Components
-        self.db = FileIndex()  # In-memory SQLite by default
+        # Core components
+        self.db = FileIndex()
         self.watcher = VaultWatcher(self.vault_path)
         self.file_tree = ActiveFileTree(app_handle)
 
-        # Active Notes Registry
+        # Active notes registry
         self._active_notes: Dict[str, ActiveNote] = {}
 
         # Guard: note_ids currently being saved (suppress watchdog events)
@@ -412,30 +387,28 @@ class VaultService:
         self._app_handle = app_handle
         self.file_tree.set_app_handle(app_handle)
 
-    # Starts the machinery.
     def start(self):
-        # Initial scan to populate DB
+        """Starts initial scan and file watching."""
         self.watcher.scan(self.db)
-        # Start watching for changes
         self.watcher.start()
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "VaultService started.")
 
-    # Stops the machinery.
     def stop(self):
+        """Stops file watching and closes all active notes."""
         self.watcher.stop()
-        # Close all active notes
         for note_id in list(self._active_notes.keys()):
             self.close_note(note_id)
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "VaultService stopped.")
 
-    #
-    #     Callback triggered by VaultWatcher.
-    #
+    # ==========================================
+    # File Event Callback (from Watcher)
+    # ==========================================
+
     def on_file_event(self, path_str: str, mtime: float):
+        """Callback triggered by VaultWatcher for every file event."""
         path = Path(path_str)
 
         # Determine event type from mtime
-        # mtime=0 means file was deleted, mtime=-1 means file was moved/renamed
         if mtime == 0.0:
             event_type = "deleted"
         elif mtime == -1.0:
@@ -445,39 +418,71 @@ class VaultService:
         else:
             event_type = "created"
 
-        # If it's a directory or non-note file, always update file tree
+        # Directory or non-note → always update file tree
         if path.is_dir() or path.suffix != ".jnote":
             self.file_tree.handle_structure_change(path_str, event_type)
             return
 
         # --- Note file event handling ---
-        # Find the corresponding ActiveNote for echo suppression
         is_echo = False
         note_id = None
         short_id = extract_short_id(path.name)
 
         if short_id:
+            # Try DB lookup first (works for create/modify/move)
             matches = self.db.get_metadata_by_short_id(short_id, str(path.parent))
             if len(matches) == 1:
                 note_id = matches[0].note_id
-                if note_id in self._active_notes:
-                    active_note = self._active_notes[note_id]
-                    if (
-                        active_note._last_save_mtime
-                        and abs(mtime - active_note._last_save_mtime) < 0.1
-                    ):
-                        is_echo = True
+
+            # For delete events, the watcher already removed the DB entry
+            # before calling us, so fall back to matching active notes by short_id
+            if note_id is None and event_type == "deleted":
+                for nid in self._active_notes:
+                    if nid.startswith(short_id):
+                        note_id = nid
+                        break
+
+            # Echo suppression check
+            if note_id and note_id in self._active_notes:
+                active_note = self._active_notes[note_id]
+                if (
+                    active_note._last_save_mtime
+                    and abs(mtime - active_note._last_save_mtime) < 0.1
+                ):
+                    is_echo = True
 
         if is_echo:
             return  # Self-save echo — skip everything
 
-        # Structural changes (created/deleted/moved) update the tree.
-        # Content modifications on existing notes do NOT.
+        # Structural changes update the tree; content mods do not
         if event_type in ("created", "deleted", "moved"):
             self.file_tree.handle_structure_change(path_str, event_type)
 
-        # Notify the ActiveNote of genuine external content changes only
-        # Skip if we're actively saving this note (race with watchdog)
+        # Handle deletion of an active note — close it and notify frontend
+        if event_type == "deleted" and note_id and note_id in self._active_notes:
+            # skip_save=True because the file no longer exists on disk
+            self.close_note(note_id, skip_save=True)
+            if HAS_EMITTER and self._app_handle is not None:
+                try:
+                    Emitter.emit(
+                        self._app_handle,
+                        "note-deleted",
+                        NoteDeletedPayload(note_id=note_id),
+                    )
+                    sys_log.log(
+                        LogSource.SYSTEM,
+                        LogLevel.INFO,
+                        f"Emitted note-deleted for {note_id}",
+                    )
+                except Exception as e:
+                    sys_log.log(
+                        LogSource.SYSTEM,
+                        LogLevel.ERROR,
+                        f"Failed to emit note-deleted: {e}",
+                    )
+            return
+
+        # Notify ActiveNote of genuine external content changes only
         if (
             event_type == "modified"
             and note_id
@@ -490,45 +495,38 @@ class VaultService:
     # Note Operations (Business Logic)
     # ==========================================
 
-    # Fetch file tree from the DB.
     def get_sidebar_data(self):
+        """Fetch all notes from the DB for sidebar display."""
         return self.db.get_all_notes()
 
-    #
-    #     Creates a note on disk and returns the metadata object.
-    #     This handles the logic manually since filesys.py doesn't have create_new_note yet.
-    #
     def create_note(self, title: str) -> Optional[NoteMetadata]:
+        """Creates a note on disk and returns the metadata object."""
         note = create_new_note(str(self.vault_path), title)
         if not note:
             return None
 
-        # The watcher will pick up the new file, but we can return the metadata immediately
-        meta = NoteMetadata(
+        # The watcher will pick up the new file, but return metadata immediately
+        return NoteMetadata(
             note_id=note.metadata.note_id,
             note_title=note.metadata.title,
             note_version=note.metadata.version,
             note_dir=self.vault_path,
         )
-        return meta
 
     def get_or_open_note(self, note_id: str) -> Optional[ActiveNote]:
-        # Return existing if already open
+        """Return an existing ActiveNote or open a new one."""
         if note_id in self._active_notes:
             return self._active_notes[note_id]
 
-        # Open new
         active_note = ActiveNote(note_id, self)
         if active_note.note_obj:
             self._active_notes[note_id] = active_note
             return active_note
         return None
 
-    def close_note(self, note_id: str):
+    def close_note(self, note_id: str, skip_save: bool = False):
+        """Close an active note. skip_save=True when file was externally deleted."""
         if note_id in self._active_notes:
-            self._active_notes[note_id].close()
+            self._active_notes[note_id].close(skip_save=skip_save)
             del self._active_notes[note_id]
             sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Closed note: {note_id}")
-
-
-# NECESSARY CHANGE: Removed global 'state_manager' instance

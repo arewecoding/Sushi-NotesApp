@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
 # Import your Logger
-from sushi.logger_service import sys_log, LogSource, LogLevel
+from sushi.logger import sys_log, LogSource, LogLevel
 
 # ==========================================
 # Global Configuration (The Single Source of Truth)
@@ -186,3 +186,48 @@ class JNote:
         )
 
         return JNote(metadata=meta)
+
+
+# ==========================================
+# Block Factory (Simple function, replaces BlockFactory class)
+# ==========================================
+
+# Maps block type → default data generator
+_BLOCK_CREATORS = {
+    "text": lambda **kw: {
+        "content": kw.get("content", ""),
+        "format": kw.get("fmt", "markdown"),
+    },
+    "todo": lambda **kw: {
+        "content": kw.get("content", ""),
+        "checked": kw.get("checked", False),
+    },
+    "code": lambda **kw: {
+        "code": kw.get("code", ""),
+        "language": kw.get("language", "python"),
+        "output": "",
+    },
+    "image": lambda **kw: {
+        "src": kw.get("src", ""),
+        "caption": kw.get("caption", ""),
+        "alignment": "center",
+    },
+    "latex": lambda **kw: {"formula": kw.get("formula", ""), "display_mode": True},
+}
+
+
+def create_block(block_type: str, **kwargs) -> NoteBlock:
+    """
+    Create a new NoteBlock with sensible defaults for the given type.
+    Supports: text, todo, code, image, latex.
+    Unknown types get an empty data dict.
+    """
+    creator = _BLOCK_CREATORS.get(block_type)
+    data = creator(**kwargs) if creator else {}
+
+    return NoteBlock(
+        block_id=str(uuid.uuid4()),
+        type=block_type,
+        data=data,
+        version=CURRENT_BLOCK_VERSION,
+    )

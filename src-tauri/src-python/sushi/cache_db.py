@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Union
-from sushi.logger_service import sys_log, LogSource, LogLevel
+from sushi.logger import sys_log, LogSource, LogLevel
 
 
 @dataclass

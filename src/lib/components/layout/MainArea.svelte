@@ -20,6 +20,10 @@
         noteContentVersion,
     } from "$lib/stores/notesStore";
     import type { NoteBlock } from "../../../client/_apiTypes";
+    import BlockToolbar from "$lib/components/editor/BlockToolbar.svelte";
+    import BlockInserter from "$lib/components/editor/BlockInserter.svelte";
+    import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
+    import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
     // Track which note and version we've initialized for
     let initializedNoteId: string | null = null;
@@ -33,6 +37,11 @@
 
     // Reactive flag to show blocks (but content is managed non-reactively)
     let showBlocks = $state(false);
+
+    // Block interaction state
+    let hoveredBlockId = $state<string | null>(null);
+    let confirmDeleteOpen = $state(false);
+    let pendingDeleteBlockId = $state<string | null>(null);
 
     // Watch for note changes and initialize ONCE per note
     // Also handles external updates via noteContentVersion
@@ -124,6 +133,105 @@
         }));
         saveNoteContentDebounced(currentTitle, blocksToSave);
     }
+
+    // ========== Block Operations ==========
+
+    function generateBlockId(): string {
+        return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    }
+
+    function createBlock(type: string): NoteBlock {
+        return {
+            blockId: generateBlockId(),
+            type,
+            data:
+                type === "code"
+                    ? { code: "" }
+                    : type === "todo"
+                      ? { content: "", checked: false }
+                      : { content: "" },
+            version: "1",
+            tags: [],
+            backlinks: [],
+        };
+    }
+
+    function insertBlockAt(index: number, type: string = "text") {
+        const newBlock = createBlock(type);
+        currentBlocks = [
+            ...currentBlocks.slice(0, index),
+            newBlock,
+            ...currentBlocks.slice(index),
+        ];
+        blockContents[newBlock.blockId] = "";
+
+        // Re-render and save
+        showBlocks = false;
+        queueMicrotask(() => {
+            showBlocks = true;
+            // Focus the new block after render
+            queueMicrotask(() => {
+                const el = document.querySelector(
+                    `[data-block-id="${newBlock.blockId}"]`,
+                );
+                if (el instanceof HTMLElement) {
+                    el.focus();
+                }
+            });
+        });
+        triggerSave();
+    }
+
+    function appendBlock() {
+        insertBlockAt(currentBlocks.length, "text");
+    }
+
+    function requestDeleteBlock(blockId: string) {
+        // Check if user has suppressed the confirmation
+        const suppressed =
+            localStorage.getItem("sushi:confirmDelete") === "true";
+        if (suppressed) {
+            executeDeleteBlock(blockId);
+        } else {
+            pendingDeleteBlockId = blockId;
+            confirmDeleteOpen = true;
+        }
+    }
+
+    function executeDeleteBlock(blockId: string) {
+        currentBlocks = currentBlocks.filter((b) => b.blockId !== blockId);
+        delete blockContents[blockId];
+        confirmDeleteOpen = false;
+        pendingDeleteBlockId = null;
+        hoveredBlockId = null;
+
+        // Re-render and save
+        showBlocks = false;
+        queueMicrotask(() => {
+            showBlocks = true;
+        });
+        triggerSave();
+    }
+
+    function moveBlock(blockId: string, direction: "up" | "down") {
+        const idx = currentBlocks.findIndex((b) => b.blockId === blockId);
+        if (idx < 0) return;
+
+        const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= currentBlocks.length) return;
+
+        // Swap
+        const copy = [...currentBlocks];
+        [copy[idx], copy[targetIdx]] = [copy[targetIdx], copy[idx]];
+        currentBlocks = copy;
+
+        // Re-render and save
+        showBlocks = false;
+        queueMicrotask(() => {
+            showBlocks = true;
+        });
+        triggerSave();
+    }
 </script>
 
 <div class="h-screen flex-grow bg-neutral-900 flex flex-col font-mono">
@@ -196,11 +304,16 @@
                 <Loader2 size={32} class="animate-spin" />
             </div>
         {:else if !$activeNoteId}
-            <!-- No note selected -->
+            <!-- No note selected — branded home -->
             <div
-                class="flex flex-col items-center justify-center h-64 text-neutral-500"
+                class="flex flex-col items-center justify-center h-full text-neutral-500 gap-4"
             >
-                <p class="text-lg mb-2">No note selected</p>
+                <img
+                    src="/logo2.png"
+                    alt="Sushi"
+                    class="w-20 h-20 object-contain opacity-40"
+                />
+                <p class="text-lg font-semibold text-neutral-400">Sushi</p>
                 <p class="text-sm">
                     Select a note from the sidebar or create a new one
                 </p>
@@ -229,61 +342,100 @@
                 ></textarea>
 
                 <!-- Blocks -->
-                <div class="space-y-4">
+                <div class="blocks-container">
                     {#if currentBlocks.length === 0}
-                        <div
-                            class="editor-block text-neutral-300 outline-none p-2 hover:bg-neutral-800/20 rounded"
-                            contenteditable="true"
-                        >
-                            Start typing here...
-                        </div>
+                        <GhostBlock onadd={appendBlock} />
                     {:else}
-                        {#each currentBlocks as block (block.blockId)}
-                            {#if block.type === "text"}
-                                <div
-                                    class="editor-block text-neutral-300 outline-none p-2 hover:bg-neutral-800/20 rounded whitespace-pre-wrap"
-                                    contenteditable="true"
-                                    use:initContent={block.blockId}
-                                    oninput={(e) =>
-                                        handleBlockInput(block.blockId, e)}
-                                ></div>
-                            {:else if block.type === "code"}
-                                <pre
-                                    class="editor-block bg-neutral-800 text-neutral-300 p-3 rounded text-sm overflow-x-auto outline-none"
-                                    contenteditable="true"
-                                    use:initContent={block.blockId}
-                                    oninput={(e) =>
-                                        handleBlockInput(
-                                            block.blockId,
-                                            e,
-                                        )}></pre>
-                            {:else if block.type === "todo"}
-                                <div
-                                    class="flex items-center gap-2 p-2 hover:bg-neutral-800/20 rounded"
-                                >
-                                    <input
-                                        type="checkbox"
-                                        checked={block.data?.checked || false}
-                                        class="accent-blue-500"
-                                    />
+                        {#each currentBlocks as block, i (block.blockId)}
+                            <!-- Inserter between blocks -->
+                            {#if i > 0}
+                                <BlockInserter
+                                    oninsert={(type: string) =>
+                                        insertBlockAt(i, type)}
+                                />
+                            {/if}
+
+                            <!-- Block wrapper with toolbar -->
+                            <!-- svelte-ignore a11y_no_static_element_interactions -->
+                            <div
+                                class="block-wrapper"
+                                class:block-hovered={hoveredBlockId ===
+                                    block.blockId}
+                                onmouseenter={() =>
+                                    (hoveredBlockId = block.blockId)}
+                                onmouseleave={() => (hoveredBlockId = null)}
+                            >
+                                <BlockToolbar
+                                    visible={hoveredBlockId === block.blockId}
+                                    isFirst={i === 0}
+                                    isLast={i === currentBlocks.length - 1}
+                                    ondelete={() =>
+                                        requestDeleteBlock(block.blockId)}
+                                    onmoveup={() =>
+                                        moveBlock(block.blockId, "up")}
+                                    onmovedown={() =>
+                                        moveBlock(block.blockId, "down")}
+                                />
+
+                                {#if block.type === "text"}
                                     <div
-                                        class="editor-block text-neutral-300 outline-none flex-1"
+                                        class="editor-block text-neutral-300 outline-none p-3 whitespace-pre-wrap"
                                         contenteditable="true"
+                                        data-block-id={block.blockId}
                                         use:initContent={block.blockId}
                                         oninput={(e) =>
                                             handleBlockInput(block.blockId, e)}
                                     ></div>
-                                </div>
-                            {:else}
-                                <div
-                                    class="editor-block text-neutral-300 outline-none p-2 hover:bg-neutral-800/20 rounded"
-                                    contenteditable="true"
-                                    use:initContent={block.blockId}
-                                    oninput={(e) =>
-                                        handleBlockInput(block.blockId, e)}
-                                ></div>
-                            {/if}
+                                {:else if block.type === "code"}
+                                    <pre
+                                        class="editor-block bg-neutral-800/60 text-neutral-300 p-3 rounded-b text-sm overflow-x-auto outline-none"
+                                        contenteditable="true"
+                                        data-block-id={block.blockId}
+                                        use:initContent={block.blockId}
+                                        oninput={(e) =>
+                                            handleBlockInput(
+                                                block.blockId,
+                                                e,
+                                            )}></pre>
+                                {:else if block.type === "todo"}
+                                    <div class="flex items-center gap-2 p-3">
+                                        <input
+                                            type="checkbox"
+                                            checked={block.data?.checked ||
+                                                false}
+                                            class="accent-orange-500"
+                                        />
+                                        <div
+                                            class="editor-block text-neutral-300 outline-none flex-1"
+                                            contenteditable="true"
+                                            data-block-id={block.blockId}
+                                            use:initContent={block.blockId}
+                                            oninput={(e) =>
+                                                handleBlockInput(
+                                                    block.blockId,
+                                                    e,
+                                                )}
+                                        ></div>
+                                    </div>
+                                {:else}
+                                    <div
+                                        class="editor-block text-neutral-300 outline-none p-3 whitespace-pre-wrap"
+                                        contenteditable="true"
+                                        data-block-id={block.blockId}
+                                        use:initContent={block.blockId}
+                                        oninput={(e) =>
+                                            handleBlockInput(block.blockId, e)}
+                                    ></div>
+                                {/if}
+                            </div>
                         {/each}
+
+                        <!-- Inserter after last block + ghost block -->
+                        <BlockInserter
+                            oninsert={(type: string) =>
+                                insertBlockAt(currentBlocks.length, type)}
+                        />
+                        <GhostBlock onadd={appendBlock} />
                     {/if}
                 </div>
             {/key}
@@ -292,3 +444,39 @@
         {/if}
     </div>
 </div>
+
+<!-- Delete confirmation dialog -->
+<ConfirmDialog
+    open={confirmDeleteOpen}
+    title="Delete Block"
+    message="Are you sure you want to delete this block? This action cannot be undone."
+    confirmLabel="Delete"
+    localStorageKey="sushi:confirmDelete"
+    onconfirm={() => {
+        if (pendingDeleteBlockId) {
+            executeDeleteBlock(pendingDeleteBlockId);
+        }
+    }}
+    oncancel={() => {
+        confirmDeleteOpen = false;
+        pendingDeleteBlockId = null;
+    }}
+/>
+
+<style>
+    .blocks-container {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .block-wrapper {
+        position: relative;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        transition: border-color 0.15s ease;
+    }
+
+    .block-wrapper.block-hovered {
+        border-color: #404040;
+    }
+</style>

@@ -184,9 +184,24 @@ export function setupNoteEventListeners(): () => void {
         }
     });
 
+    // Listen for external note deletion — close the editor if active note was deleted
+    const unlistenDeleted = listen<{ noteId: string }>("note-deleted", (event) => {
+        const deletedNoteId = event.payload.noteId;
+        const currentNoteId = get(activeNoteId);
+
+        console.log("Note deleted externally:", deletedNoteId);
+
+        if (deletedNoteId && deletedNoteId === currentNoteId) {
+            activeNoteId.set(null);
+            activeNoteContent.set(null);
+            addToast('warning', 'The open note was deleted');
+        }
+    });
+
     // Return cleanup function
     return () => {
         unlisten.then((fn) => fn());
+        unlistenDeleted.then((fn) => fn());
     };
 }
 

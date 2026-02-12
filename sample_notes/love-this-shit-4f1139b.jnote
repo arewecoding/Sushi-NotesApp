@@ -1,0 +1,101 @@
+{
+  "metadata": {
+    "note_id": "4f1139b8-6f8c-4be2-9f57-64554805a267",
+    "title": "Love this shit",
+    "created_at": "2026-01-10T12:30:31.081313Z",
+    "last_modified": "2026-02-12T19:35:04.484757Z",
+    "version": "1.0",
+    "status": 0,
+    "tags": [],
+    "last_known_path": "C:\\Users\\ADMIN\\Development\\PyTauri\\test project\\test_1\\sushi\\sample_notes\\love-this-shit-4f1139b.jnote"
+  },
+  "custom_fields": {},
+  "blocks": [
+    {
+      "block_id": "8cd31c6c-cd21-4157-a76f-42d333239a50",
+      "type": "text",
+      "data": {
+        "content": "This is the actual text content of my note.",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [
+        "summary",
+        "todo"
+      ],
+      "backlinks": []
+    },
+    {
+      "block_id": "35e03b29-5e88-4608-a2d8-27de2268f22f",
+      "type": "text",
+      "data": {
+        "content": "This is the Second Block, new edit another one",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [
+        "summary",
+        "todo"
+      ],
+      "backlinks": []
+    },
+    {
+      "block_id": "af176423-2d39-410e-b65e-7b908d5f76a6",
+      "type": "text",
+      "data": {
+        "content": "Updated via ActiveNote Manager!",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [
+        "summary",
+        "todo"
+      ],
+      "backlinks": []
+    },
+    {
+      "block_id": "67c7bcf3-34f6-491d-99f3-713f25de7e9b",
+      "type": "text",
+      "data": {
+        "content": "Edit, I changed this in notepad while the app is running. Let's see if this reflects when I save",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [],
+      "backlinks": []
+    },
+    {
+      "block_id": "573393d2-55fa-4a94-8ddc-dc1d6fb2e037",
+      "type": "text",
+      "data": {
+        "content": "Brooooo not this again - meow",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [],
+      "backlinks": []
+    },
+    {
+      "block_id": "a65d9fb4e5c34925",
+      "type": "code",
+      "data": {
+        "code": "print(\"Hello World\")",
+        "content": "print(\"Hello World\")"
+      },
+      "version": "1",
+      "tags": [],
+      "backlinks": []
+    },
+    {
+      "block_id": "c8999c70-7b15-4950-b042-5965f4afce44",
+      "type": "text",
+      "data": {
+        "content": "Test Block added via Backend at 14:32:22",
+        "format": "markdown"
+      },
+      "version": "1.0",
+      "tags": [],
+      "backlinks": []
+    }
+  ]
+}
