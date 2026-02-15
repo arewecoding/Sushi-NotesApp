@@ -6,7 +6,20 @@
     isSearchOpen,
   } from "$lib/stores/layout";
   import { createAndOpenNote } from "$lib/stores/notesStore";
-  import { refreshTree } from "$lib/stores/fileTreeStore";
+  import { refreshTree, selectedDirPath } from "$lib/stores/fileTreeStore";
+  import {
+    moveItem,
+    moveNoteById,
+    createDirectoryIn,
+  } from "../../../client/apiClient";
+  import { addToast } from "$lib/stores/toastStore";
+  import {
+    dragItem,
+    dragPosition,
+    dragOverDir,
+    updateDragPosition,
+    endDrag,
+  } from "$lib/stores/dragStore";
   import FileTreeNode from "./FileTreeNode.svelte";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -26,34 +39,95 @@
   }
 
   function handleDrag(event: MouseEvent) {
-    if (!isDragging) return;
+    if (isDragging) {
+      const newWidth = Math.max(200, Math.min(500, event.clientX));
+      $leftPanelWidth = newWidth;
+    }
+    // Always call — handles both pending (threshold check) and active drag
+    updateDragPosition(event);
+  }
 
-    // Clamp between 200 and 500
-    const newWidth = Math.max(200, Math.min(500, event.clientX));
-    $leftPanelWidth = newWidth;
+  function handleNewNote() {
+    createAndOpenNote("Untitled Note", $selectedDirPath);
+  }
+
+  async function handleNewFolder() {
+    const folderName = prompt("Folder name:");
+    if (!folderName || !folderName.trim()) return;
+
+    const parentPath = $selectedDirPath ?? "";
+    try {
+      const result = await createDirectoryIn(parentPath, folderName.trim());
+      if (result.success) {
+        refreshTree();
+        addToast("success", `Created folder "${folderName.trim()}"`);
+      } else {
+        addToast("error", result.message || "Failed to create folder");
+      }
+    } catch (error) {
+      console.error("Failed to create folder:", error);
+      addToast("error", "Failed to create folder");
+    }
+  }
+
+  // Mouse-based drag-and-drop: handle drop on mouseup
+  async function handleMouseUp() {
+    // ALWAYS read state then clear — must clear hold timer even for quick clicks
+    const item = $dragItem;
+    const targetDir = $dragOverDir;
+    endDrag(); // clears timer, cursor, and all drag state
+
+    if (!item) return; // Quick click — no drag was active
+
+    if (!targetDir) return; // Dropped outside any directory
+
+    // Resolve the actual path for the target directory
+    const destDir = targetDir === "__root__" ? "" : targetDir;
+
+    try {
+      let result;
+      if (item.type === "note") {
+        result = await moveNoteById(item.id, destDir);
+      } else {
+        if (item.id === destDir) return;
+        result = await moveItem(item.id, destDir);
+      }
+
+      if (result.success) {
+        refreshTree();
+        addToast("success", "Moved successfully");
+      } else {
+        addToast("error", result.message || "Move failed");
+      }
+    } catch (error) {
+      console.error("Drop failed:", error);
+      addToast("error", "Move failed");
+    }
   }
 
   // Listen for tree-changed events from backend
-  // This listener is in LeftPanel, NOT in FileTreeNode, so it won't be
-  // destroyed when the tree is re-rendered via {#key}
   onMount(() => {
     const unlisten = listen<{
       changed_path: string;
       event_type: string;
     }>("tree-changed", (event) => {
       console.log("Tree changed event received:", event.payload);
-      // Increment tree version to force complete re-render of all nodes
       refreshTree();
     });
 
     return () => {
-      // Cleanup listener on unmount
       unlisten.then((fn) => fn());
     };
   });
 </script>
 
-<svelte:window onmousemove={handleDrag} onmouseup={stopDrag} />
+<svelte:window
+  onmousemove={handleDrag}
+  onmouseup={(e) => {
+    stopDrag();
+    handleMouseUp();
+  }}
+/>
 
 {#if $isLeftPanelOpen}
   <div
@@ -61,6 +135,8 @@
     style="width: {$leftPanelWidth}px"
   >
     <!-- Drag Handle -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500/50 transition-colors z-50"
       onmousedown={startDrag}
@@ -85,23 +161,35 @@
         </button>
         <button
           class="p-1 text-neutral-400 hover:text-neutral-100 rounded hover:bg-neutral-800"
-          title="New Note"
-          onclick={() => createAndOpenNote()}
+          title="New Note{$selectedDirPath ? ' (in selected folder)' : ''}"
+          onclick={handleNewNote}
         >
           <Plus size={16} />
         </button>
         <button
           class="p-1 text-neutral-400 hover:text-neutral-100 rounded hover:bg-neutral-800"
-          title="New Folder"
+          title="New Folder{$selectedDirPath ? ' (in selected folder)' : ''}"
+          onclick={handleNewFolder}
         >
           <FolderPlus size={16} />
         </button>
       </div>
     </div>
 
-    <!-- File Tree (keyed to force re-render on tree changes) -->
+    <!-- File Tree -->
     <div class="flex-grow overflow-y-auto p-2">
       <FileTreeNode path={null} name="Vault" isRoot={true} />
     </div>
+  </div>
+{/if}
+
+<!-- Drag overlay (follows cursor while dragging) -->
+{#if $dragItem}
+  <div
+    class="fixed pointer-events-none z-[9999] px-3 py-1.5 rounded-md text-xs font-medium shadow-lg"
+    style="left: {$dragPosition.x + 12}px; top: {$dragPosition.y -
+      8}px; background: rgba(249,115,22,0.9); color: white;"
+  >
+    {$dragItem.name}
   </div>
 {/if}

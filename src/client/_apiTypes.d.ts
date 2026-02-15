@@ -85,6 +85,48 @@ export interface UpdateNoteContentRequest {
     blocks: NoteBlock[];
 }
 
+export interface CreateNoteInDirRequest {
+    title: string;
+    dirPath: string;
+}
+
+export interface DeleteNoteRequest {
+    noteId: string;
+}
+
+export interface DeleteDirectoryRequest {
+    dirPath: string;
+}
+
+export interface MoveItemRequest {
+    sourcePath: string;
+    destDir: string;
+}
+
+export interface DuplicateNoteRequest {
+    noteId: string;
+}
+
+export interface CreateDirectoryRequest {
+    parentPath: string;
+    dirName: string;
+}
+
+export interface MoveNoteRequest {
+    noteId: string;
+    destDir: string;
+}
+
+export interface RenameNoteRequest {
+    noteId: string;
+    newTitle: string;
+}
+
+export interface RenameDirectoryRequest {
+    dirPath: string;
+    newName: string;
+}
+
 // Commands interface for type-safe API calls
 export interface Commands {
     get_directory_contents: {
@@ -117,6 +159,42 @@ export interface Commands {
     };
     delete_block: {
         input: DeleteBlockRequest;
+        output: OperationResponse;
+    };
+    create_note_in_dir: {
+        input: CreateNoteInDirRequest;
+        output: NoteListItem | null;
+    };
+    delete_note_cmd: {
+        input: DeleteNoteRequest;
+        output: OperationResponse;
+    };
+    delete_directory_cmd: {
+        input: DeleteDirectoryRequest;
+        output: OperationResponse;
+    };
+    move_item_cmd: {
+        input: MoveItemRequest;
+        output: OperationResponse;
+    };
+    duplicate_note_cmd: {
+        input: DuplicateNoteRequest;
+        output: NoteListItem | null;
+    };
+    create_directory_cmd: {
+        input: CreateDirectoryRequest;
+        output: OperationResponse;
+    };
+    move_note_cmd: {
+        input: MoveNoteRequest;
+        output: OperationResponse;
+    };
+    rename_note_cmd: {
+        input: RenameNoteRequest;
+        output: OperationResponse;
+    };
+    rename_directory_cmd: {
+        input: RenameDirectoryRequest;
         output: OperationResponse;
     };
 }

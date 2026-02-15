@@ -5,14 +5,15 @@
 {#if visible}
     <div class="splash-overlay" class:fade-out={!visible}>
         <div class="splash-content">
-            <div class="logo-container">
-                <img src="/logo2.png" alt="Sushi" class="splash-logo" />
+            <div class="gif-container">
+                <img
+                    src="/loading_animation.gif"
+                    alt="Loading"
+                    class="splash-gif"
+                />
             </div>
             <h1 class="app-name">Sushi</h1>
             <p class="app-tagline">Your notes, your way</p>
-            <div class="loading-bar">
-                <div class="loading-bar-fill"></div>
-            </div>
         </div>
     </div>
 {/if}
@@ -42,15 +43,25 @@
         gap: 1rem;
     }
 
-    .logo-container {
+    .gif-container {
         animation: float 2s ease-in-out infinite;
     }
 
-    .splash-logo {
-        width: 120px;
-        height: 120px;
+    .splash-gif {
+        width: 300px;
+        height: 300px;
         object-fit: contain;
-        filter: drop-shadow(0 0 30px rgba(251, 146, 60, 0.3));
+        /* Feather/fade the edges to hide green screen lines */
+        mask-image: radial-gradient(
+            ellipse 80% 80% at center,
+            black 50%,
+            transparent 100%
+        );
+        -webkit-mask-image: radial-gradient(
+            ellipse 80% 80% at center,
+            black 50%,
+            transparent 100%
+        );
     }
 
     .app-name {
@@ -68,23 +79,6 @@
         letter-spacing: 0.05em;
     }
 
-    .loading-bar {
-        width: 160px;
-        height: 3px;
-        background: #262626;
-        border-radius: 2px;
-        overflow: hidden;
-        margin-top: 1.5rem;
-    }
-
-    .loading-bar-fill {
-        height: 100%;
-        width: 40%;
-        background: linear-gradient(90deg, #fb923c, #f97316);
-        border-radius: 2px;
-        animation: loading 1.2s ease-in-out infinite;
-    }
-
     @keyframes float {
         0%,
         100% {
@@ -92,18 +86,6 @@
         }
         50% {
             transform: translateY(-8px);
-        }
-    }
-
-    @keyframes loading {
-        0% {
-            transform: translateX(-100%);
-        }
-        50% {
-            transform: translateX(200%);
-        }
-        100% {
-            transform: translateX(400%);
         }
     }
 

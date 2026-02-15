@@ -16,6 +16,13 @@ from sushi.filesys import (
     create_new_note,
     get_note_filepath,
     extract_short_id,
+    delete_note as filesys_delete_note,
+    delete_directory as filesys_delete_directory,
+    create_directory as filesys_create_directory,
+    move_item as filesys_move_item,
+    duplicate_note as filesys_duplicate_note,
+    rename_note as filesys_rename_note,
+    rename_directory as filesys_rename_directory,
 )
 from sushi.note_schema import JNote, NoteBlock, create_block
 from sushi.cache_db import FileIndex, NoteMetadata
@@ -500,18 +507,21 @@ class VaultService:
         return self.db.get_all_notes()
 
     def create_note(self, title: str) -> Optional[NoteMetadata]:
-        """Creates a note on disk and returns the metadata object."""
+        """Creates a note on disk and registers it in the DB immediately."""
         note = create_new_note(str(self.vault_path), title)
         if not note:
             return None
 
-        # The watcher will pick up the new file, but return metadata immediately
-        return NoteMetadata(
+        meta = NoteMetadata(
             note_id=note.metadata.note_id,
             note_title=note.metadata.title,
             note_version=note.metadata.version,
             note_dir=self.vault_path,
         )
+        # Register in DB immediately so get_directory_contents returns it
+        # (watcher's INSERT OR REPLACE is idempotent — safe double-write)
+        self.db.add_metadata(meta)
+        return meta
 
     def get_or_open_note(self, note_id: str) -> Optional[ActiveNote]:
         """Return an existing ActiveNote or open a new one."""
@@ -530,3 +540,108 @@ class VaultService:
             self._active_notes[note_id].close(skip_save=skip_save)
             del self._active_notes[note_id]
             sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Closed note: {note_id}")
+
+    # ==========================================
+    # File Tree CRUD Operations
+    # ==========================================
+
+    def create_note_in_dir(self, title: str, dir_path: str) -> Optional[NoteMetadata]:
+        """Creates a note in a specific directory and registers it in the DB immediately."""
+        note = create_new_note(dir_path, title)
+        if not note:
+            return None
+        meta = NoteMetadata(
+            note_id=note.metadata.note_id,
+            note_title=note.metadata.title,
+            note_version=note.metadata.version,
+            note_dir=Path(dir_path),
+        )
+        self.db.add_metadata(meta)
+        return meta
+
+    def delete_note_by_id(self, note_id: str) -> bool:
+        """Closes active note (if open) and deletes from disk."""
+        self.close_note(note_id, skip_save=True)
+        return filesys_delete_note(self.db, note_id)
+
+    def delete_directory_by_path(self, dir_path: str) -> bool:
+        """Closes any active notes inside, then deletes directory."""
+        # Close all active notes whose files are in this directory
+        notes_to_close = []
+        dir_p = Path(dir_path)
+        for nid, an in self._active_notes.items():
+            if an.note_obj:
+                fp = get_note_filepath(self.db, nid)
+                if fp and str(fp).startswith(str(dir_p)):
+                    notes_to_close.append(nid)
+        for nid in notes_to_close:
+            self.close_note(nid, skip_save=True)
+
+        return filesys_delete_directory(dir_path)
+
+    def _resolve_dest_dir(self, dest_dir: str) -> str:
+        """If dest_dir is empty, resolve to vault root."""
+        if not dest_dir or not dest_dir.strip():
+            return str(self.vault_path)
+        return dest_dir
+
+    def move_item(self, src_path: str, dest_dir: str) -> bool:
+        """Moves a file or directory. Watcher handles DB updates."""
+        dest_dir = self._resolve_dest_dir(dest_dir)
+        result = filesys_move_item(src_path, dest_dir)
+        return result is not None
+
+    def move_note_by_id(self, note_id: str, dest_dir: str) -> bool:
+        """Moves a note by ID — resolves path from DB first."""
+        dest_dir = self._resolve_dest_dir(dest_dir)
+        self.close_note(note_id, skip_save=False)
+        file_path = get_note_filepath(self.db, note_id)
+        if not file_path:
+            sys_log.log(
+                LogSource.SYSTEM, LogLevel.ERROR, f"Note not found for move: {note_id}"
+            )
+            return False
+        result = filesys_move_item(str(file_path), dest_dir)
+        return result is not None
+
+    def rename_note_by_id(self, note_id: str, new_title: str) -> bool:
+        """Renames a note — closes it first, then updates title and filename."""
+        self.close_note(note_id, skip_save=False)
+        return filesys_rename_note(self.db, note_id, new_title)
+
+    def rename_directory_by_path(self, dir_path: str, new_name: str) -> bool:
+        """Renames a directory on disk. Watcher handles DB updates."""
+        # Close any active notes inside this directory
+        dir_p = Path(dir_path)
+        notes_to_close = []
+        for nid, an in self._active_notes.items():
+            if an.note_obj:
+                fp = get_note_filepath(self.db, nid)
+                if fp and str(fp).startswith(str(dir_p)):
+                    notes_to_close.append(nid)
+        for nid in notes_to_close:
+            self.close_note(nid, skip_save=False)
+        result = filesys_rename_directory(dir_path, new_name)
+        return result is not None
+
+    def duplicate_note_by_id(self, note_id: str) -> Optional[NoteMetadata]:
+        """Duplicates a note and registers the copy in the DB immediately."""
+        copy = filesys_duplicate_note(self.db, note_id)
+        if not copy:
+            return None
+        # Get the actual directory from the original note
+        original_meta = self.db.get_metadata(note_id)
+        note_dir = original_meta.note_dir if original_meta else self.vault_path
+        meta = NoteMetadata(
+            note_id=copy.metadata.note_id,
+            note_title=copy.metadata.title,
+            note_version=copy.metadata.version,
+            note_dir=note_dir,
+        )
+        self.db.add_metadata(meta)
+        return meta
+
+    def create_directory_in(self, parent_path: str, dir_name: str) -> bool:
+        """Creates a subdirectory. Watcher triggers tree refresh."""
+        result = filesys_create_directory(parent_path, dir_name)
+        return result is not None

@@ -17,6 +17,13 @@ export const expandedDirs = writable<Set<string>>(new Set(['__root__']));
 export const treeVersion = writable(0);
 
 /**
+ * Currently selected directory path in the file tree.
+ * Used by the + button to create notes in the right directory.
+ * null = vault root.
+ */
+export const selectedDirPath = writable<string | null>(null);
+
+/**
  * Toggle a directory's expanded/collapsed state.
  */
 export function toggleDir(dirKey: string): void {
@@ -27,6 +34,18 @@ export function toggleDir(dirKey: string): void {
         } else {
             next.add(dirKey);
         }
+        return next;
+    });
+}
+
+/**
+ * Expand a directory (one-way, never collapses).
+ * Used for drag hover auto-expand.
+ */
+export function expandDir(dirKey: string): void {
+    expandedDirs.update(dirs => {
+        const next = new Set(dirs);
+        next.add(dirKey);
         return next;
     });
 }

@@ -74,6 +74,58 @@ class VaultConfig(PyTauriModel):
     path: str
 
 
+class CreateNoteInDirRequest(PyTauriModel):
+    """Create a note in a specific directory."""
+
+    title: str = "Untitled Note"
+    dir_path: str
+
+
+class DeleteNoteRequest(PyTauriModel):
+    note_id: str
+
+
+class DeleteDirectoryRequest(PyTauriModel):
+    dir_path: str
+
+
+class MoveItemRequest(PyTauriModel):
+    """Move a file or directory to a destination directory."""
+
+    source_path: str
+    dest_dir: str
+
+
+class DuplicateNoteRequest(PyTauriModel):
+    note_id: str
+
+
+class MoveNoteRequest(PyTauriModel):
+    """Move a note (by ID) to a destination directory."""
+
+    note_id: str
+    dest_dir: str
+
+
+class CreateDirectoryRequest(PyTauriModel):
+    parent_path: str
+    dir_name: str
+
+
+class RenameNoteRequest(PyTauriModel):
+    """Rename a note by ID."""
+
+    note_id: str
+    new_title: str
+
+
+class RenameDirectoryRequest(PyTauriModel):
+    """Rename a directory."""
+
+    dir_path: str
+    new_name: str
+
+
 # ==========================================
 # Response Models (Backend → Frontend)
 # ==========================================

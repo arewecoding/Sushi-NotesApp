@@ -105,3 +105,103 @@ export async function deleteBlock(
 ): Promise<OperationResponse> {
     return await pyInvoke("delete_block", request, options);
 }
+
+// ==========================================
+// File Tree CRUD Operations
+// ==========================================
+
+/**
+ * Creates a new note in a specific directory.
+ */
+export async function createNoteInDir(
+    title: string,
+    dirPath: string,
+    options?: InvokeOptions
+): Promise<NoteListItem | null> {
+    return await pyInvoke("create_note_in_dir", { title, dirPath }, options);
+}
+
+/**
+ * Deletes a note by ID (closes if active, removes file).
+ */
+export async function deleteNoteById(
+    noteId: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("delete_note_cmd", { noteId }, options);
+}
+
+/**
+ * Deletes a directory and all its contents.
+ */
+export async function deleteDirectoryByPath(
+    dirPath: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("delete_directory_cmd", { dirPath }, options);
+}
+
+/**
+ * Moves a note or directory to another directory.
+ */
+export async function moveItem(
+    sourcePath: string,
+    destDir: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("move_item_cmd", { sourcePath, destDir }, options);
+}
+
+/**
+ * Creates an exact copy of a note with 'Copy of' prefix.
+ */
+export async function duplicateNote(
+    noteId: string,
+    options?: InvokeOptions
+): Promise<NoteListItem | null> {
+    return await pyInvoke("duplicate_note_cmd", { noteId }, options);
+}
+
+/**
+ * Creates a new subdirectory.
+ */
+export async function createDirectoryIn(
+    parentPath: string,
+    dirName: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("create_directory_cmd", { parentPath, dirName }, options);
+}
+
+/**
+ * Moves a note by ID to a destination directory.
+ */
+export async function moveNoteById(
+    noteId: string,
+    destDir: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("move_note_cmd", { noteId, destDir }, options);
+}
+
+/**
+ * Renames a note by ID.
+ */
+export async function renameNoteById(
+    noteId: string,
+    newTitle: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("rename_note_cmd", { noteId, newTitle }, options);
+}
+
+/**
+ * Renames a directory.
+ */
+export async function renameDirectoryByPath(
+    dirPath: string,
+    newName: string,
+    options?: InvokeOptions
+): Promise<OperationResponse> {
+    return await pyInvoke("rename_directory_cmd", { dirPath, newName }, options);
+}

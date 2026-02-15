@@ -326,3 +326,215 @@ def delete_directory(dir_path: str) -> bool:
             LogSource.SYSTEM, LogLevel.ERROR, f"Failed to delete directory: {e}"
         )
         return False
+
+
+# ==========================================
+# Move & Duplicate Operations
+# ==========================================
+
+
+def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
+    """
+    Moves a file or directory into dest_dir.
+    Returns the new path on success, None on failure.
+    Validates: source exists, dest is dir, no name collision,
+    no parent→child cycle, not same directory, not self-move.
+    """
+    try:
+        src = Path(src_path).resolve()
+        dest = Path(dest_dir).resolve()
+
+        if not src.exists():
+            sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Source not found: {src}")
+            return None
+        if not dest.is_dir():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Destination is not a directory: {dest}",
+            )
+            return None
+
+        # Guard: move-to-self
+        if src == dest:
+            sys_log.log(
+                LogSource.SYSTEM, LogLevel.WARNING, "Cannot move item into itself"
+            )
+            return None
+
+        # Guard: same directory (already there)
+        if src.parent == dest:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.WARNING,
+                "Item is already in the destination directory",
+            )
+            return None
+
+        # Guard: parent→child cycle (only for directories)
+        if src.is_dir():
+            try:
+                dest.relative_to(src)
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.ERROR,
+                    f"Cannot move parent into child: {src} -> {dest}",
+                )
+                return None
+            except ValueError:
+                pass  # Not a child — safe
+
+        new_path = dest / src.name
+        if new_path.exists():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Destination already has item named {src.name}",
+            )
+            return None
+
+        shutil.move(str(src), str(new_path))
+        sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Moved: {src} -> {new_path}")
+        return new_path
+    except Exception as e:
+        sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Failed to move item: {e}")
+        return None
+
+
+def duplicate_note(db: FileIndex, note_id: str) -> Optional[JNote]:
+    """
+    Creates an exact copy of a note with a new ID and 'Copy of' title prefix.
+    The duplicate is saved in the same directory as the original.
+    """
+    try:
+        meta = db.get_metadata(note_id)
+        if not meta:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.WARNING,
+                f"Note not found for duplicate: {note_id}",
+            )
+            return None
+
+        # Load the original note
+        file_path = get_note_filepath(db, note_id)
+        if not file_path or not file_path.exists():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Original file not found for duplicate: {note_id}",
+            )
+            return None
+
+        original = load_jnote(file_path)
+        if not original:
+            return None
+
+        # Create the copy with a new identity
+        copy_note = JNote.create_new(f"Copy of {original.metadata.title}")
+        copy_note.blocks = original.blocks  # Share block data (deep enough via JNote)
+        copy_note.custom_fields = dict(original.custom_fields)
+
+        # Save in the same directory
+        copy_filename = generate_filename(
+            copy_note.metadata.title, copy_note.metadata.note_id
+        )
+        copy_path = file_path.parent / copy_filename
+        copy_note.metadata.last_known_path = str(copy_path.resolve())
+
+        save_jnote(copy_path, copy_note)
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.INFO,
+            f"Duplicated note: {file_path} -> {copy_path}",
+        )
+        return copy_note
+    except Exception as e:
+        sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Failed to duplicate note: {e}")
+        return None
+
+
+def rename_note(db: FileIndex, note_id: str, new_title: str) -> bool:
+    """
+    Renames a note: updates title in metadata and renames the file on disk.
+    """
+    try:
+        meta = db.get_metadata(note_id)
+        if not meta:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.WARNING,
+                f"Note not found for rename: {note_id}",
+            )
+            return False
+
+        file_path = get_note_filepath(db, note_id)
+        if not file_path or not file_path.exists():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"File not found for rename: {note_id}",
+            )
+            return False
+
+        # Load, update title, save with new filename
+        note = load_jnote(file_path)
+        if not note:
+            return False
+
+        note.metadata.title = new_title
+        new_filename = generate_filename(new_title, note_id)
+        new_path = file_path.parent / new_filename
+        note.metadata.last_known_path = str(new_path.resolve())
+
+        save_jnote(file_path, note)  # Save first (updates title in JSON)
+        if file_path != new_path:
+            file_path.rename(new_path)  # Then rename file
+
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.INFO,
+            f"Renamed note: {file_path.name} -> {new_filename}",
+        )
+        return True
+    except Exception as e:
+        sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Failed to rename note: {e}")
+        return False
+
+
+def rename_directory(dir_path: str, new_name: str) -> Optional[Path]:
+    """
+    Renames a directory on disk.
+    Returns the new path on success, None on failure.
+    """
+    try:
+        src = Path(dir_path)
+        if not src.is_dir():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Directory not found for rename: {dir_path}",
+            )
+            return None
+
+        new_path = src.parent / new_name
+        if new_path.exists():
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"A directory named '{new_name}' already exists",
+            )
+            return None
+
+        src.rename(new_path)
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.INFO,
+            f"Renamed directory: {src.name} -> {new_name}",
+        )
+        return new_path
+    except Exception as e:
+        sys_log.log(
+            LogSource.SYSTEM, LogLevel.ERROR, f"Failed to rename directory: {e}"
+        )
+        return None

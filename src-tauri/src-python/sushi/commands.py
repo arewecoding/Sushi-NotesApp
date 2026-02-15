@@ -13,6 +13,15 @@ from sushi.cache_db import NoteMetadata
 from sushi.models import (
     OpenNoteRequest,
     CreateNoteRequest,
+    CreateNoteInDirRequest,
+    DeleteNoteRequest,
+    DeleteDirectoryRequest,
+    MoveItemRequest,
+    MoveNoteRequest,
+    DuplicateNoteRequest,
+    CreateDirectoryRequest,
+    RenameNoteRequest,
+    RenameDirectoryRequest,
     CreateBlockRequest,
     UpdateBlockRequest,
     DeleteBlockRequest,
@@ -237,4 +246,153 @@ async def delete_block(
         return OperationResponse(success=True, message="Block deleted")
     except Exception as e:
         sys_log.log(LogSource.API, LogLevel.ERROR, f"delete_block failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+# ==========================================
+# File Tree CRUD Commands
+# ==========================================
+
+
+@commands.command()
+async def create_note_in_dir(
+    body: CreateNoteInDirRequest, app_handle: AppHandle
+) -> Optional[NoteListItem]:
+    """Creates a new note in a specific directory."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        meta = vault_service.create_note_in_dir(body.title, body.dir_path)
+        if not meta:
+            return None
+        return NoteListItem(note_id=meta.note_id, note_title=meta.note_title)
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"create_note_in_dir failed: {e}")
+        raise
+
+
+@commands.command()
+async def delete_note_cmd(
+    body: DeleteNoteRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Deletes a note (closes if active, then removes file)."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.delete_note_by_id(body.note_id)
+        if success:
+            return OperationResponse(success=True, message="Note deleted")
+        return OperationResponse(success=False, message="Note not found")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"delete_note_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def delete_directory_cmd(
+    body: DeleteDirectoryRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Deletes a directory and all its contents."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.delete_directory_by_path(body.dir_path)
+        if success:
+            return OperationResponse(success=True, message="Directory deleted")
+        return OperationResponse(success=False, message="Directory not found")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"delete_directory_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def move_item_cmd(
+    body: MoveItemRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Moves a note or directory to another directory."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.move_item(body.source_path, body.dest_dir)
+        if success:
+            return OperationResponse(success=True, message="Item moved")
+        return OperationResponse(success=False, message="Move failed")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"move_item_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def duplicate_note_cmd(
+    body: DuplicateNoteRequest, app_handle: AppHandle
+) -> Optional[NoteListItem]:
+    """Creates an exact copy of a note with 'Copy of' prefix."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        meta = vault_service.duplicate_note_by_id(body.note_id)
+        if not meta:
+            return None
+        return NoteListItem(note_id=meta.note_id, note_title=meta.note_title)
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"duplicate_note_cmd failed: {e}")
+        raise
+
+
+@commands.command()
+async def create_directory_cmd(
+    body: CreateDirectoryRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Creates a new subdirectory."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.create_directory_in(body.parent_path, body.dir_name)
+        if success:
+            return OperationResponse(success=True, message="Directory created")
+        return OperationResponse(success=False, message="Failed to create directory")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"create_directory_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def move_note_cmd(
+    body: MoveNoteRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Moves a note by ID to a destination directory."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.move_note_by_id(body.note_id, body.dest_dir)
+        if success:
+            return OperationResponse(success=True, message="Note moved")
+        return OperationResponse(success=False, message="Move failed")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"move_note_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def rename_note_cmd(
+    body: RenameNoteRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Renames a note by ID."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.rename_note_by_id(body.note_id, body.new_title)
+        if success:
+            return OperationResponse(success=True, message="Note renamed")
+        return OperationResponse(success=False, message="Rename failed")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"rename_note_cmd failed: {e}")
+        return OperationResponse(success=False, message=str(e))
+
+
+@commands.command()
+async def rename_directory_cmd(
+    body: RenameDirectoryRequest, app_handle: AppHandle
+) -> OperationResponse:
+    """Renames a directory."""
+    try:
+        vault_service: VaultService = Manager.state(app_handle, VaultService)
+        success = vault_service.rename_directory_by_path(body.dir_path, body.new_name)
+        if success:
+            return OperationResponse(success=True, message="Directory renamed")
+        return OperationResponse(success=False, message="Rename failed")
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"rename_directory_cmd failed: {e}")
         return OperationResponse(success=False, message=str(e))

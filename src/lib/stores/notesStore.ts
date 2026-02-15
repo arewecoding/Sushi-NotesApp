@@ -6,8 +6,9 @@
 
 import { writable, derived, get } from 'svelte/store';
 import type { NoteListItem, NoteContent, NoteBlock } from '../../client/_apiTypes';
-import { getSidebar, openNote, createNote, updateNoteContent } from '../../client/apiClient';
+import { getSidebar, openNote, createNote, updateNoteContent, createNoteInDir, deleteNoteById, duplicateNote } from '../../client/apiClient';
 import { addToast } from './toastStore';
+import { refreshTree } from './fileTreeStore';
 import { listen } from '@tauri-apps/api/event';
 
 // Store for list of notes (sidebar)
@@ -131,6 +132,7 @@ export async function addNewNote(title: string = 'Untitled Note'): Promise<strin
         if (newNote) {
             // Add to the notes list
             notesList.update(notes => [...notes, newNote]);
+            refreshTree();
             addToast('success', `Created "${newNote.noteTitle}"`);
             return newNote.noteId;
         } else {
@@ -146,11 +148,79 @@ export async function addNewNote(title: string = 'Untitled Note'): Promise<strin
 
 /**
  * Create a new note and immediately open it.
+ * If dirPath is provided, creates the note in that directory.
  */
-export async function createAndOpenNote(title: string = 'Untitled Note'): Promise<void> {
-    const noteId = await addNewNote(title);
+export async function createAndOpenNote(title: string = 'Untitled Note', dirPath?: string | null): Promise<void> {
+    let noteId: string | null = null;
+    if (dirPath) {
+        try {
+            const newNote = await createNoteInDir(title, dirPath);
+            if (newNote) {
+                notesList.update(notes => [...notes, newNote]);
+                refreshTree();
+                addToast('success', `Created "${newNote.noteTitle}"`);
+                noteId = newNote.noteId;
+            }
+        } catch (error) {
+            console.error('Failed to create note in dir:', error);
+            addToast('error', 'Failed to create note');
+        }
+    } else {
+        noteId = await addNewNote(title);
+    }
     if (noteId) {
         await loadNote(noteId);
+    }
+}
+
+/**
+ * Delete a note by ID. Clears active note if it's the one being deleted.
+ */
+export async function deleteNoteAction(noteId: string): Promise<boolean> {
+    try {
+        const result = await deleteNoteById(noteId);
+        if (result.success) {
+            // Clear active note if it was the deleted one
+            const currentId = get(activeNoteId);
+            if (currentId === noteId) {
+                activeNoteId.set(null);
+                activeNoteContent.set(null);
+            }
+            // Remove from sidebar list
+            notesList.update(notes => notes.filter(n => n.noteId !== noteId));
+            refreshTree();
+            addToast('success', 'Note deleted');
+            return true;
+        } else {
+            addToast('error', result.message || 'Failed to delete note');
+            return false;
+        }
+    } catch (error) {
+        console.error('Failed to delete note:', error);
+        addToast('error', 'Failed to delete note');
+        return false;
+    }
+}
+
+/**
+ * Duplicate a note. Creates 'Copy of ...' beside the original.
+ */
+export async function duplicateNoteAction(noteId: string): Promise<string | null> {
+    try {
+        const copy = await duplicateNote(noteId);
+        if (copy) {
+            notesList.update(notes => [...notes, copy]);
+            refreshTree();
+            addToast('success', `Created "${copy.noteTitle}"`);
+            return copy.noteId;
+        } else {
+            addToast('error', 'Failed to duplicate note');
+            return null;
+        }
+    } catch (error) {
+        console.error('Failed to duplicate note:', error);
+        addToast('error', 'Failed to duplicate note');
+        return null;
     }
 }
 
