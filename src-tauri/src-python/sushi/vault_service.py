@@ -585,11 +585,13 @@ class VaultService:
             return str(self.vault_path)
         return dest_dir
 
-    def move_item(self, src_path: str, dest_dir: str) -> bool:
-        """Moves a file or directory. Watcher handles DB updates."""
+    def move_item(self, src_path: str, dest_dir: str) -> tuple[bool, str]:
+        """Moves a file or directory. Returns (success, message). Watcher handles DB updates."""
         dest_dir = self._resolve_dest_dir(dest_dir)
-        result = filesys_move_item(src_path, dest_dir)
-        return result is not None
+        result, message = filesys_move_item(src_path, dest_dir)
+        if result is not None:
+            return True, "Item moved"
+        return False, message
 
     def move_note_by_id(self, note_id: str, dest_dir: str) -> bool:
         """Moves a note by ID — resolves path from DB first."""

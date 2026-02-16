@@ -24,6 +24,14 @@
     import BlockInserter from "$lib/components/editor/BlockInserter.svelte";
     import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+    import {
+        dragBlockIndex,
+        dropTargetIndex,
+        isBlockDragging,
+        startBlockDrag,
+        updateDropTarget,
+        endBlockDrag,
+    } from "$lib/stores/blockDragStore";
 
     // Track which note and version we've initialized for
     let initializedNoteId: string | null = null;
@@ -220,19 +228,41 @@
         const targetIdx = direction === "up" ? idx - 1 : idx + 1;
         if (targetIdx < 0 || targetIdx >= currentBlocks.length) return;
 
-        // Swap
         const copy = [...currentBlocks];
         [copy[idx], copy[targetIdx]] = [copy[targetIdx], copy[idx]];
         currentBlocks = copy;
 
-        // Re-render and save
         showBlocks = false;
         queueMicrotask(() => {
             showBlocks = true;
         });
         triggerSave();
     }
+
+    function reorderBlock(fromIndex: number, toIndex: number) {
+        if (fromIndex === toIndex) return;
+        const copy = [...currentBlocks];
+        const [moved] = copy.splice(fromIndex, 1);
+        copy.splice(toIndex, 0, moved);
+        currentBlocks = copy;
+
+        showBlocks = false;
+        queueMicrotask(() => {
+            showBlocks = true;
+        });
+        triggerSave();
+    }
+
+    function handleBlockMouseUp() {
+        const result = endBlockDrag();
+        if (result) {
+            const [from, to] = result;
+            reorderBlock(from, to);
+        }
+    }
 </script>
+
+<svelte:window onmouseup={handleBlockMouseUp} />
 
 <div class="h-screen flex-grow bg-neutral-900 flex flex-col font-mono">
     <!-- Editor Toolbar -->
@@ -342,7 +372,10 @@
                 ></textarea>
 
                 <!-- Blocks -->
-                <div class="blocks-container">
+                <div
+                    class="blocks-container"
+                    class:block-dragging-active={$isBlockDragging}
+                >
                     {#if currentBlocks.length === 0}
                         <GhostBlock onadd={appendBlock} />
                     {:else}
@@ -355,16 +388,41 @@
                                 />
                             {/if}
 
-                            <!-- Block wrapper with toolbar -->
+                            <!-- Block wrapper with toolbar and drag handle -->
                             <!-- svelte-ignore a11y_no_static_element_interactions -->
                             <div
                                 class="block-wrapper"
                                 class:block-hovered={hoveredBlockId ===
                                     block.blockId}
-                                onmouseenter={() =>
-                                    (hoveredBlockId = block.blockId)}
+                                class:block-dragging={$isBlockDragging &&
+                                    $dragBlockIndex === i}
+                                class:block-drop-above={$isBlockDragging &&
+                                    $dropTargetIndex === i &&
+                                    $dragBlockIndex > i}
+                                class:block-drop-below={$isBlockDragging &&
+                                    $dropTargetIndex === i &&
+                                    $dragBlockIndex < i}
+                                onmouseenter={() => {
+                                    hoveredBlockId = block.blockId;
+                                    if ($isBlockDragging) updateDropTarget(i);
+                                }}
                                 onmouseleave={() => (hoveredBlockId = null)}
                             >
+                                <!-- Drag handle -->
+                                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                <div
+                                    class="drag-handle"
+                                    onmousedown={(e) => {
+                                        e.preventDefault();
+                                        if (e.button === 0) startBlockDrag(i);
+                                    }}
+                                    title="Hold to drag"
+                                >
+                                    <div class="handle-dots">
+                                        <span></span><span></span><span></span>
+                                        <span></span><span></span><span></span>
+                                    </div>
+                                </div>
                                 <BlockToolbar
                                     visible={hoveredBlockId === block.blockId}
                                     isFirst={i === 0}
@@ -469,14 +527,108 @@
         flex-direction: column;
     }
 
+    /* Prevent text selection while dragging blocks */
+    :global(.block-dragging-active) {
+        user-select: none !important;
+        -webkit-user-select: none !important;
+    }
+
     .block-wrapper {
         position: relative;
         border: 1px solid transparent;
         border-radius: 8px;
-        transition: border-color 0.15s ease;
+        transition:
+            border-color 0.15s ease,
+            margin 0.25s ease,
+            opacity 0.2s ease;
+        padding-left: 24px;
     }
 
     .block-wrapper.block-hovered {
         border-color: #404040;
+    }
+
+    /* Drag handle */
+    .drag-handle {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: grab;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+        border-radius: 4px 0 0 4px;
+    }
+
+    .block-wrapper.block-hovered .drag-handle,
+    .block-wrapper:hover .drag-handle {
+        opacity: 1;
+    }
+
+    .drag-handle:hover {
+        background: #333;
+    }
+
+    .drag-handle:active {
+        cursor: grabbing;
+    }
+
+    .handle-dots {
+        display: grid;
+        grid-template-columns: repeat(2, 4px);
+        gap: 2px;
+    }
+
+    .handle-dots span {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background: #666;
+    }
+
+    /* Dragging state */
+    .block-wrapper.block-dragging {
+        opacity: 0.35;
+        border-color: #525252;
+        border-style: dashed;
+    }
+
+    /* Drop target ghost placeholder — translucent orange box */
+    .block-wrapper.block-drop-above {
+        margin-top: 56px;
+    }
+
+    .block-wrapper.block-drop-above::before {
+        content: "";
+        position: absolute;
+        left: 24px;
+        right: 0;
+        top: -52px;
+        height: 48px;
+        border: 2px dashed rgba(249, 115, 22, 0.6);
+        border-radius: 8px;
+        background: rgba(249, 115, 22, 0.06);
+        pointer-events: none;
+    }
+
+    .block-wrapper.block-drop-below {
+        margin-bottom: 56px;
+    }
+
+    .block-wrapper.block-drop-below::after {
+        content: "";
+        position: absolute;
+        left: 24px;
+        right: 0;
+        bottom: -52px;
+        height: 48px;
+        border: 2px dashed rgba(249, 115, 22, 0.6);
+        border-radius: 8px;
+        background: rgba(249, 115, 22, 0.06);
+        pointer-events: none;
     }
 </style>

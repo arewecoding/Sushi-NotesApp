@@ -309,10 +309,8 @@ async def move_item_cmd(
     """Moves a note or directory to another directory."""
     try:
         vault_service: VaultService = Manager.state(app_handle, VaultService)
-        success = vault_service.move_item(body.source_path, body.dest_dir)
-        if success:
-            return OperationResponse(success=True, message="Item moved")
-        return OperationResponse(success=False, message="Move failed")
+        success, message = vault_service.move_item(body.source_path, body.dest_dir)
+        return OperationResponse(success=success, message=message)
     except Exception as e:
         sys_log.log(LogSource.API, LogLevel.ERROR, f"move_item_cmd failed: {e}")
         return OperationResponse(success=False, message=str(e))

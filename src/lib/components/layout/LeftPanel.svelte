@@ -21,8 +21,17 @@
     endDrag,
   } from "$lib/stores/dragStore";
   import FileTreeNode from "./FileTreeNode.svelte";
+  import ContextMenu from "../ContextMenu.svelte";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+
+  // Right-click context menu state
+  let panelContextMenu = $state<{ x: number; y: number } | null>(null);
+
+  function handlePanelContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    panelContextMenu = { x: e.clientX, y: e.clientY };
+  }
 
   let isDragging = false;
 
@@ -177,10 +186,35 @@
     </div>
 
     <!-- File Tree -->
-    <div class="flex-grow overflow-y-auto p-2">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="flex-grow overflow-y-auto p-2"
+      oncontextmenu={handlePanelContextMenu}
+    >
       <FileTreeNode path={null} name="Vault" isRoot={true} />
     </div>
   </div>
+{/if}
+
+<!-- Panel right-click context menu -->
+{#if panelContextMenu}
+  <ContextMenu
+    x={panelContextMenu.x}
+    y={panelContextMenu.y}
+    items={[
+      {
+        label: "New Note",
+        icon: "📄",
+        action: () => handleNewNote(),
+      },
+      {
+        label: "New Folder",
+        icon: "📁",
+        action: () => handleNewFolder(),
+      },
+    ]}
+    onclose={() => (panelContextMenu = null)}
+  />
 {/if}
 
 <!-- Drag overlay (follows cursor while dragging) -->

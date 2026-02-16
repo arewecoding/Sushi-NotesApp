@@ -333,10 +333,10 @@ def delete_directory(dir_path: str) -> bool:
 # ==========================================
 
 
-def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
+def move_item(src_path: str, dest_dir: str) -> tuple[Optional[Path], str]:
     """
     Moves a file or directory into dest_dir.
-    Returns the new path on success, None on failure.
+    Returns (new_path, "") on success, (None, error_message) on failure.
     Validates: source exists, dest is dir, no name collision,
     no parent→child cycle, not same directory, not self-move.
     """
@@ -346,21 +346,21 @@ def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
 
         if not src.exists():
             sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Source not found: {src}")
-            return None
+            return None, "Source file or folder not found"
         if not dest.is_dir():
             sys_log.log(
                 LogSource.SYSTEM,
                 LogLevel.ERROR,
                 f"Destination is not a directory: {dest}",
             )
-            return None
+            return None, "Destination is not a valid directory"
 
         # Guard: move-to-self
         if src == dest:
             sys_log.log(
                 LogSource.SYSTEM, LogLevel.WARNING, "Cannot move item into itself"
             )
-            return None
+            return None, "Item cannot be moved into itself"
 
         # Guard: same directory (already there)
         if src.parent == dest:
@@ -369,7 +369,7 @@ def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
                 LogLevel.WARNING,
                 "Item is already in the destination directory",
             )
-            return None
+            return None, "Item is already in this directory"
 
         # Guard: parent→child cycle (only for directories)
         if src.is_dir():
@@ -380,7 +380,10 @@ def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
                     LogLevel.ERROR,
                     f"Cannot move parent into child: {src} -> {dest}",
                 )
-                return None
+                return (
+                    None,
+                    "Invalid move — Can't move a parent directory into its child",
+                )
             except ValueError:
                 pass  # Not a child — safe
 
@@ -391,14 +394,14 @@ def move_item(src_path: str, dest_dir: str) -> Optional[Path]:
                 LogLevel.ERROR,
                 f"Destination already has item named {src.name}",
             )
-            return None
+            return None, f'An item named "{src.name}" already exists in the destination'
 
         shutil.move(str(src), str(new_path))
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Moved: {src} -> {new_path}")
-        return new_path
+        return new_path, ""
     except Exception as e:
         sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Failed to move item: {e}")
-        return None
+        return None, f"Move failed: {e}"
 
 
 def duplicate_note(db: FileIndex, note_id: str) -> Optional[JNote]:
