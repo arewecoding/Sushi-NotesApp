@@ -1,0 +1,16 @@
+{
+    "embedding_provider": "google",
+    "embedding_model": "gemini-embedding-001",
+    "embedding_dimensions": 768,
+    "llm_provider": "google",
+    "llm_model": "gemini-2.0-flash",
+    "reranker_provider": "google",
+    "google_api_key": "",
+    "similarity_threshold": 0.85,
+    "tombstone_compaction_ratio": 0.20,
+    "indexer_debounce_seconds": 2.0,
+    "retrieval_top_k": 50,
+    "reranker_top_k": 10,
+    "astar_max_nodes": 100,
+    "context_max_tokens": 4000
+}

@@ -1,0 +1,86 @@
+{
+    "description": "Golden test corpus for evaluating the Vadapav RAG pipeline.",
+    "version": "1.0",
+    "test_cases": [
+        {
+            "query": "What is the actual text content of my note?",
+            "expected_block_ids": [
+                "8cd31c6c-cd21-4157-a76f-42d333239a50"
+            ],
+            "expected_key_points": [
+                "The note contains text about actual text content"
+            ],
+            "strategy_hint": "direct_recall",
+            "tags": [
+                "single-hop",
+                "factual"
+            ]
+        },
+        {
+            "query": "Show me all the code blocks in my notes",
+            "expected_block_ids": [
+                "a65d9fb4e5c34925"
+            ],
+            "expected_key_points": [
+                "There is a Python code block with print Hello World"
+            ],
+            "strategy_hint": "direct_recall",
+            "tags": [
+                "single-hop",
+                "code"
+            ]
+        },
+        {
+            "query": "What blocks are tagged with summary and todo?",
+            "expected_block_ids": [
+                "8cd31c6c-cd21-4157-a76f-42d333239a50",
+                "af176423-2d39-410e-b65e-7b908d5f76a6",
+                "35e03b29-5e88-4608-a2d8-27de2268f22f"
+            ],
+            "expected_key_points": [
+                "Multiple blocks are tagged with summary and todo",
+                "These include the actual text content block, the ActiveNote Manager block, and the Second Block"
+            ],
+            "strategy_hint": "direct_recall",
+            "tags": [
+                "multi-hop",
+                "metadata"
+            ]
+        },
+        {
+            "query": "How do the different blocks in my love-this-shit note relate to each other?",
+            "expected_block_ids": [
+                "8cd31c6c-cd21-4157-a76f-42d333239a50",
+                "573393d2-55fa-4a94-8ddc-dc1d6fb2e037",
+                "af176423-2d39-410e-b65e-7b908d5f76a6",
+                "35e03b29-5e88-4608-a2d8-27de2268f22f"
+            ],
+            "expected_key_points": [
+                "The note contains multiple text blocks and a code block",
+                "Some blocks share tags (summary, todo) indicating they are related",
+                "The note appears to be a test note with various types of content"
+            ],
+            "strategy_hint": "contextual_traversal",
+            "tags": [
+                "multi-hop",
+                "relationship"
+            ]
+        },
+        {
+            "query": "Was anything updated via the backend?",
+            "expected_block_ids": [
+                "af176423-2d39-410e-b65e-7b908d5f76a6",
+                "c8999c70-7b15-4950-b042-5965f4afce44"
+            ],
+            "expected_key_points": [
+                "A block was updated via ActiveNote Manager",
+                "A test block was added via Backend at 14:32:22"
+            ],
+            "strategy_hint": "direct_recall",
+            "tags": [
+                "single-hop",
+                "factual"
+            ]
+        }
+    ]
+}

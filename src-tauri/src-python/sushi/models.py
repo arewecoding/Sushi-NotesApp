@@ -194,3 +194,61 @@ class VaultReadyPayload(PyTauriModel):
     """Payload for vault-ready event (backend initialization complete)."""
 
     pass
+
+
+# ==========================================
+# RAG Request / Response Models
+# ==========================================
+
+
+class RagQueryRequest(PyTauriModel):
+    """Ask the RAG pipeline a natural-language question over the notes vault."""
+
+    query: str
+
+
+class RagQueryResponse(PyTauriModel):
+    """Full result from a RAG pipeline run."""
+
+    answer: str
+    strategy: str  # 'direct_recall' | 'contextual_traversal' | 'disabled' | 'error'
+    query_original: str
+    query_optimized: str
+    blocks_retrieved: int
+    blocks_reranked: int
+    blocks_in_context: int
+    context_truncated: bool
+    latency: Dict[str, float]
+    rag_enabled: bool
+
+
+class RagBuildIndexRequest(PyTauriModel):
+    """Trigger a full rebuild of the RAG index over the entire vault.
+
+    No parameters — always rebuilds from the vault root configured at startup.
+    """
+
+    pass
+
+
+class RagBuildIndexResponse(PyTauriModel):
+    """Statistics returned after a full index rebuild."""
+
+    status: str  # 'ok' | 'error' | 'disabled'
+    notes_indexed: int
+    blocks_indexed: int
+    graph_nodes: int
+    graph_edges: int
+    rag_enabled: bool
+    message: str = ""
+
+
+class RagStatusResponse(PyTauriModel):
+    """Health snapshot of the RAG index."""
+
+    rag_enabled: bool
+    faiss_vectors: int
+    tombstone_ratio: float
+    graph_nodes: int
+    graph_edges: int
+    message: str

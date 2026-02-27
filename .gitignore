@@ -47,3 +47,16 @@ src-tauri/resources/python-*
 # pnpm-lock.yaml
 # uv.lock
 # Cargo.lock
+
+# API Keys & secrets
+src-tauri/google_api_key.json
+src-tauri/rag_config.json
+
+# RAG generated data (FAISS index, SQLite graph DB — large binaries)
+**/.rag_data/
+
+# Personal vault notes (user data, not source code)
+sample_notes/
+
+# Sushi app log
+.sushi/

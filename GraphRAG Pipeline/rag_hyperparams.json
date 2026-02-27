@@ -1,0 +1,43 @@
+{
+    "_comment": "Hyperparameters for the RAG pipeline. Edit these to tune performance.",
+    "edge_weights": {
+        "_comment": "Lower weight = stronger relationship = lower A* traversal cost",
+        "backlink": 0.1,
+        "same_note": 0.2,
+        "shared_tag": 0.3,
+        "semantically_similar": 0.5
+    },
+    "search": {
+        "rrf_k": 60,
+        "retrieval_overfetch_multiplier": 2,
+        "faiss_overfetch_multiplier": 3
+    },
+    "reranker": {
+        "temperature": 0.0,
+        "content_preview_max_chars": 500
+    },
+    "router": {
+        "routing_temperature": 0.0,
+        "optimization_temperature": 0.0
+    },
+    "llm": {
+        "synthesis_temperature": 0.3
+    },
+    "context_assembly": {
+        "chars_per_token": 4,
+        "min_remaining_chars_for_truncated_block": 100
+    },
+    "indexer": {
+        "semantic_edge_top_k": 20,
+        "daemon_idle_sleep_seconds": 1.0,
+        "daemon_error_backoff_seconds": 5.0,
+        "daemon_dequeue_batch_size": 5
+    },
+    "traversal": {
+        "entry_nodes_count": 5,
+        "unknown_node_heuristic_cost": 1.0
+    },
+    "evaluation": {
+        "judge_temperature": 0.0
+    }
+}

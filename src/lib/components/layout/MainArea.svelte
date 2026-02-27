@@ -18,11 +18,14 @@
         isSavingNote,
         saveNoteContentDebounced,
         noteContentVersion,
+        notesList,
+        loadNote,
     } from "$lib/stores/notesStore";
     import type { NoteBlock } from "../../../client/_apiTypes";
     import BlockToolbar from "$lib/components/editor/BlockToolbar.svelte";
     import BlockInserter from "$lib/components/editor/BlockInserter.svelte";
     import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
+    import LinkedBlock from "$lib/components/editor/LinkedBlock.svelte";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import {
         dragBlockIndex,
@@ -120,10 +123,28 @@
 
     function handleBlockInput(blockId: string, e: Event) {
         const target = e.target as HTMLElement;
-        // Update our plain JS storage (no reactivity, no re-render)
         blockContents[blockId] = target.textContent || "";
-        // Save
         triggerSave();
+    }
+
+    /** Called by LinkedBlock's onchange — receives plain text with [[links]] preserved. */
+    function handleLinkedBlockChange(blockId: string, text: string) {
+        blockContents[blockId] = text;
+        triggerSave();
+    }
+
+    /** Navigate to a linked note (and optionally scroll to a block). */
+    async function handleNavigate(noteId: string, blockId: string | null) {
+        await loadNote(noteId);
+        if (blockId) {
+            // Wait for DOM then scroll to block
+            await new Promise((r) => setTimeout(r, 150));
+            const el = document.querySelector(`[data-block-id="${blockId}"]`);
+            if (el instanceof HTMLElement) {
+                el.scrollIntoView({ behavior: "smooth", block: "center" });
+                el.focus();
+            }
+        }
     }
 
     function triggerSave() {
@@ -436,14 +457,17 @@
                                 />
 
                                 {#if block.type === "text"}
-                                    <div
-                                        class="editor-block text-neutral-300 outline-none p-3 whitespace-pre-wrap"
-                                        contenteditable="true"
-                                        data-block-id={block.blockId}
-                                        use:initContent={block.blockId}
-                                        oninput={(e) =>
-                                            handleBlockInput(block.blockId, e)}
-                                    ></div>
+                                    <!-- LinkedBlock renders [[display|note_id]] links inline -->
+                                    <LinkedBlock
+                                        blockId={block.blockId}
+                                        initialContent={blockContents[
+                                            block.blockId
+                                        ] || ""}
+                                        notesList={$notesList}
+                                        className="text-neutral-300 p-3"
+                                        onchange={handleLinkedBlockChange}
+                                        onnavigate={handleNavigate}
+                                    />
                                 {:else if block.type === "code"}
                                     <pre
                                         class="editor-block bg-neutral-800/60 text-neutral-300 p-3 rounded-b text-sm overflow-x-auto outline-none"
@@ -456,24 +480,23 @@
                                                 e,
                                             )}></pre>
                                 {:else if block.type === "todo"}
-                                    <div class="flex items-center gap-2 p-3">
+                                    <div class="flex items-start gap-2 p-3">
                                         <input
                                             type="checkbox"
                                             checked={block.data?.checked ||
                                                 false}
-                                            class="accent-orange-500"
+                                            class="accent-orange-500 mt-1 flex-shrink-0"
                                         />
-                                        <div
-                                            class="editor-block text-neutral-300 outline-none flex-1"
-                                            contenteditable="true"
-                                            data-block-id={block.blockId}
-                                            use:initContent={block.blockId}
-                                            oninput={(e) =>
-                                                handleBlockInput(
-                                                    block.blockId,
-                                                    e,
-                                                )}
-                                        ></div>
+                                        <LinkedBlock
+                                            blockId={block.blockId}
+                                            initialContent={blockContents[
+                                                block.blockId
+                                            ] || ""}
+                                            notesList={$notesList}
+                                            className="text-neutral-300 flex-1"
+                                            onchange={handleLinkedBlockChange}
+                                            onnavigate={handleNavigate}
+                                        />
                                     </div>
                                 {:else}
                                     <div

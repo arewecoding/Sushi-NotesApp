@@ -4,11 +4,13 @@ Sushi IPC Commands
 All PyTauri command handlers (IPC entry points from the frontend).
 """
 
+import asyncio
 from typing import Optional, List, Dict, Any
 
 from pytauri import AppHandle, Commands, Manager
 
 from sushi.vault_service import VaultService
+from sushi.rag_service import RAGService
 from sushi.cache_db import NoteMetadata
 from sushi.models import (
     OpenNoteRequest,
@@ -32,6 +34,11 @@ from sushi.models import (
     NoteContent,
     DirectoryItem,
     DirectoryContents,
+    RagQueryRequest,
+    RagQueryResponse,
+    RagBuildIndexRequest,
+    RagBuildIndexResponse,
+    RagStatusResponse,
 )
 from sushi.logger import sys_log, LogSource, LogLevel
 
@@ -394,3 +401,99 @@ async def rename_directory_cmd(
     except Exception as e:
         sys_log.log(LogSource.API, LogLevel.ERROR, f"rename_directory_cmd failed: {e}")
         return OperationResponse(success=False, message=str(e))
+
+
+# ==========================================
+# RAG Commands
+# ==========================================
+
+
+@commands.command()
+async def rag_query(body: RagQueryRequest, app_handle: AppHandle) -> RagQueryResponse:
+    """
+    Run the full GraphRAG pipeline for a natural-language query.
+
+    Executes in a background thread (asyncio.to_thread) so the Gemini API
+    calls do not block the async event loop.
+    """
+    try:
+        rag_service: RAGService = Manager.state(app_handle, RAGService)
+        result = await asyncio.to_thread(rag_service.query, body.query)
+        sys_log.log(
+            LogSource.API,
+            LogLevel.DEBUG,
+            f"rag_query: strategy={result.get('strategy')} "
+            f"blocks={result.get('blocks_retrieved')}",
+        )
+        return RagQueryResponse(**result)
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"rag_query failed: {e}")
+        return RagQueryResponse(
+            answer=f"Query failed: {e}",
+            strategy="error",
+            query_original=body.query,
+            query_optimized=body.query,
+            blocks_retrieved=0,
+            blocks_reranked=0,
+            blocks_in_context=0,
+            context_truncated=False,
+            latency={},
+            rag_enabled=False,
+        )
+
+
+@commands.command()
+async def rag_build_index(
+    body: RagBuildIndexRequest, app_handle: AppHandle
+) -> RagBuildIndexResponse:
+    """
+    Trigger a full rebuild of the RAG index over the entire vault.
+
+    This calls the Gemini embedding API for every block in the vault — it may
+    take from a few seconds to a few minutes depending on vault size.
+    Runs in a background thread so the UI stays responsive.
+    """
+    try:
+        rag_service: RAGService = Manager.state(app_handle, RAGService)
+        result = await asyncio.to_thread(rag_service.build_index)
+        sys_log.log(
+            LogSource.API,
+            LogLevel.INFO,
+            f"rag_build_index: {result}",
+        )
+        return RagBuildIndexResponse(**result)
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"rag_build_index failed: {e}")
+        return RagBuildIndexResponse(
+            status="error",
+            notes_indexed=0,
+            blocks_indexed=0,
+            graph_nodes=0,
+            graph_edges=0,
+            rag_enabled=False,
+            message=str(e),
+        )
+
+
+@commands.command()
+async def rag_status(app_handle: AppHandle) -> RagStatusResponse:
+    """
+    Return a health snapshot of the RAG index (fast, no API calls).
+
+    Useful for the frontend to show whether RAG is available and how many
+    notes are indexed.
+    """
+    try:
+        rag_service: RAGService = Manager.state(app_handle, RAGService)
+        result = rag_service.status()
+        return RagStatusResponse(**result)
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"rag_status failed: {e}")
+        return RagStatusResponse(
+            rag_enabled=False,
+            faiss_vectors=0,
+            tombstone_ratio=0.0,
+            graph_nodes=0,
+            graph_edges=0,
+            message=str(e),
+        )
