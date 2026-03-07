@@ -4,6 +4,13 @@
         Italic,
         Link,
         List,
+        Strikethrough,
+        Code,
+        Quote,
+        Minus,
+        Heading1,
+        Heading2,
+        Heading3,
         PanelRightOpen,
         PanelRightClose,
         PanelLeftOpen,
@@ -25,7 +32,8 @@
     import BlockToolbar from "$lib/components/editor/BlockToolbar.svelte";
     import BlockInserter from "$lib/components/editor/BlockInserter.svelte";
     import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
-    import LinkedBlock from "$lib/components/editor/LinkedBlock.svelte";
+    import RichTextBlock from "$lib/components/editor/RichTextBlock.svelte";
+    import LaTeXBlock from "$lib/components/editor/LaTeXBlock.svelte";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import {
         dragBlockIndex,
@@ -53,6 +61,76 @@
     let hoveredBlockId = $state<string | null>(null);
     let confirmDeleteOpen = $state(false);
     let pendingDeleteBlockId = $state<string | null>(null);
+
+    // ── Context-aware toolbar ──────────────────────────────────────────────
+    /** The block that currently has keyboard focus */
+    let focusedBlock = $state<{ id: string; type: string } | null>(null);
+
+    /** Component refs — keyed by blockId */
+    let blockRefs: Record<
+        string,
+        {
+            applyFormat?: (t: string) => void;
+            insertSnippet?: (t: string) => void;
+        } | null
+    > = {};
+
+    function handleBlockFocusIn(blockId: string, blockType: string) {
+        focusedBlock = { id: blockId, type: blockType };
+    }
+
+    function handleBlockFocusOut() {
+        // Small delay so clicking a toolbar button doesn't clear focusedBlock
+        // before the button's onclick fires
+        setTimeout(() => {
+            // Only clear if nothing inside the editor area is newly focused
+            if (!document.activeElement?.closest(".editor-content-area")) {
+                focusedBlock = null;
+            }
+        }, 150);
+    }
+
+    /** Dispatch a format action to the currently focused text/todo block */
+    function toolbarFormat(type: string) {
+        if (!focusedBlock) return;
+        const ref = blockRefs[focusedBlock.id];
+        ref?.applyFormat?.(type);
+    }
+
+    /** Insert a LaTeX snippet into the currently focused latex block */
+    function toolbarLatex(snippet: string) {
+        if (!focusedBlock) return;
+        const ref = blockRefs[focusedBlock.id];
+        ref?.insertSnippet?.(snippet);
+    }
+
+    /** LaTeX snippet definitions for the toolbar */
+    const latexSnippets: Array<{
+        label: string;
+        title: string;
+        snippet: string;
+        sep?: boolean;
+    }> = [
+        { label: "√", title: "Square root", snippet: "\\sqrt{}" },
+        { label: "½", title: "Fraction", snippet: "\\frac{}{}" },
+        { label: "∫", title: "Integral", snippet: "\\int_{a}^{b}" },
+        { label: "Σ", title: "Summation", snippet: "\\sum_{i=1}^{n}" },
+        { label: "lim", title: "Limit", snippet: "\\lim_{x \\to \\infty}" },
+        { label: "", title: "", snippet: "", sep: true },
+        { label: "x²", title: "Superscript", snippet: "^{}" },
+        { label: "x₂", title: "Subscript", snippet: "_{}" },
+        {
+            label: "⊞",
+            title: "Matrix (2×2)",
+            snippet: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}",
+        },
+        { label: "", title: "", snippet: "", sep: true },
+        { label: "α", title: "Alpha", snippet: "\\alpha" },
+        { label: "β", title: "Beta", snippet: "\\beta" },
+        { label: "π", title: "Pi", snippet: "\\pi" },
+        { label: "θ", title: "Theta", snippet: "\\theta" },
+        { label: "∞", title: "Infinity", snippet: "\\infty" },
+    ];
 
     // Watch for note changes and initialize ONCE per note
     // Also handles external updates via noteContentVersion
@@ -178,7 +256,9 @@
                     ? { code: "" }
                     : type === "todo"
                       ? { content: "", checked: false }
-                      : { content: "" },
+                      : type === "latex"
+                        ? { content: "" }
+                        : { content: "" },
             version: "1",
             tags: [],
             backlinks: [],
@@ -300,27 +380,138 @@
             {/if}
         </button>
         <div class="w-px h-4 bg-neutral-800 mx-1"></div>
-        <button
-            class="p-1.5 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded transition-colors"
-        >
-            <Bold size={16} />
-        </button>
-        <button
-            class="p-1.5 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded transition-colors"
-        >
-            <Italic size={16} />
-        </button>
-        <div class="w-px h-4 bg-neutral-800 mx-1"></div>
-        <button
-            class="p-1.5 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded transition-colors"
-        >
-            <List size={16} />
-        </button>
-        <button
-            class="p-1.5 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded transition-colors"
-        >
-            <Link size={16} />
-        </button>
+
+        {#if focusedBlock?.type === "text" || focusedBlock?.type === "todo"}
+            <!-- ── Text / Markdown toolbar ── -->
+            <button
+                class="toolbar-fmt-btn"
+                title="Bold (wraps selection)"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("bold");
+                }}
+            >
+                <Bold size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Italic (wraps selection)"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("italic");
+                }}
+            >
+                <Italic size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Strikethrough"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("strike");
+                }}
+            >
+                <Strikethrough size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Inline code"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("code");
+                }}
+            >
+                <Code size={14} />
+            </button>
+            <div class="w-px h-4 bg-neutral-800 mx-1"></div>
+            <button
+                class="toolbar-fmt-btn"
+                title="Heading 1"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("h1");
+                }}
+            >
+                <Heading1 size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Heading 2"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("h2");
+                }}
+            >
+                <Heading2 size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Heading 3"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("h3");
+                }}
+            >
+                <Heading3 size={14} />
+            </button>
+            <div class="w-px h-4 bg-neutral-800 mx-1"></div>
+            <button
+                class="toolbar-fmt-btn"
+                title="Bullet list (new line)"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("list");
+                }}
+            >
+                <List size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Blockquote"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("quote");
+                }}
+            >
+                <Quote size={14} />
+            </button>
+            <button
+                class="toolbar-fmt-btn"
+                title="Horizontal rule"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    toolbarFormat("hr");
+                }}
+            >
+                <Minus size={14} />
+            </button>
+        {:else if focusedBlock?.type === "latex"}
+            <!-- ── LaTeX toolbar ── -->
+            <span
+                class="text-[10px] font-semibold text-orange-500 font-mono tracking-widest mr-1"
+                >LaTeX</span
+            >
+            <div class="w-px h-4 bg-neutral-800 mx-1"></div>
+            {#each latexSnippets as item}
+                {#if item.sep}
+                    <div class="w-px h-4 bg-neutral-800 mx-1"></div>
+                {:else}
+                    <button
+                        class="toolbar-fmt-btn font-mono text-xs"
+                        title={item.title}
+                        onmousedown={(e) => {
+                            e.preventDefault();
+                            toolbarLatex(item.snippet);
+                        }}>{item.label}</button
+                    >
+                {/if}
+            {/each}
+        {:else}
+            <!-- No block focused — subtle hint -->
+            <span class="text-xs text-neutral-700 italic select-none"
+                >Select a block to format</span
+            >
+        {/if}
 
         <div class="flex-grow"></div>
         {#if $isSavingNote}
@@ -349,7 +540,9 @@
     </div>
 
     <!-- Editor Content -->
-    <div class="flex-grow overflow-y-auto p-12 max-w-4xl mx-auto w-full">
+    <div
+        class="flex-grow overflow-y-auto p-12 max-w-4xl mx-auto w-full editor-content-area"
+    >
         {#if $isLoadingNote}
             <div class="flex items-center justify-center h-64 text-neutral-500">
                 <Loader2 size={32} class="animate-spin" />
@@ -428,6 +621,12 @@
                                     if ($isBlockDragging) updateDropTarget(i);
                                 }}
                                 onmouseleave={() => (hoveredBlockId = null)}
+                                onfocusin={() =>
+                                    handleBlockFocusIn(
+                                        block.blockId,
+                                        block.type,
+                                    )}
+                                onfocusout={handleBlockFocusOut}
                             >
                                 <!-- Drag handle -->
                                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -457,8 +656,9 @@
                                 />
 
                                 {#if block.type === "text"}
-                                    <!-- LinkedBlock renders [[display|note_id]] links inline -->
-                                    <LinkedBlock
+                                    <!-- RichTextBlock: markdown + KaTeX + links, Typora-style edit -->
+                                    <RichTextBlock
+                                        bind:this={blockRefs[block.blockId]}
                                         blockId={block.blockId}
                                         initialContent={blockContents[
                                             block.blockId
@@ -487,7 +687,8 @@
                                                 false}
                                             class="accent-orange-500 mt-1 flex-shrink-0"
                                         />
-                                        <LinkedBlock
+                                        <RichTextBlock
+                                            bind:this={blockRefs[block.blockId]}
                                             blockId={block.blockId}
                                             initialContent={blockContents[
                                                 block.blockId
@@ -498,6 +699,16 @@
                                             onnavigate={handleNavigate}
                                         />
                                     </div>
+                                {:else if block.type === "latex"}
+                                    <LaTeXBlock
+                                        bind:this={blockRefs[block.blockId]}
+                                        blockId={block.blockId}
+                                        initialContent={blockContents[
+                                            block.blockId
+                                        ] || ""}
+                                        className="p-1"
+                                        onchange={handleLinkedBlockChange}
+                                    />
                                 {:else}
                                     <div
                                         class="editor-block text-neutral-300 outline-none p-3 whitespace-pre-wrap"
@@ -545,6 +756,33 @@
 />
 
 <style>
+    /* Context-aware toolbar format buttons */
+    .toolbar-fmt-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 26px;
+        height: 26px;
+        padding: 0 4px;
+        border-radius: 4px;
+        background: none;
+        border: none;
+        color: #9ca3af;
+        cursor: pointer;
+        transition:
+            background 0.1s,
+            color 0.1s;
+        line-height: 1;
+    }
+    .toolbar-fmt-btn:hover {
+        background: #2d2d2d;
+        color: #f3f4f6;
+    }
+    .toolbar-fmt-btn:active {
+        background: rgba(249, 115, 22, 0.15);
+        color: #f97316;
+    }
+
     .blocks-container {
         display: flex;
         flex-direction: column;

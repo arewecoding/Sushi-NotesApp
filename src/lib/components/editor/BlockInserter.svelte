@@ -14,6 +14,7 @@
         { type: "text", label: "Text", icon: "Aa" },
         { type: "code", label: "Code", icon: "</>" },
         { type: "todo", label: "Todo", icon: "☐" },
+        { type: "latex", label: "LaTeX", icon: "∑" },
     ];
 
     function handleInsert(type: string) {

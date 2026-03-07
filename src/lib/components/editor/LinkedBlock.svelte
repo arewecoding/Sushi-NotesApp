@@ -2,17 +2,21 @@
     /**
      * LinkedBlock.svelte
      * ==================
-     * A rich-text block that renders [[display|note_id]] links inline.
+     * A rich-text block that renders inline links:
+     *   [[text||note||uuid]]   → orange span, navigates to note
+     *   [[text||block||nid/bid]] → amber span, navigates to note + scrolls block
+     *   [[text||web||url]]     → sky-blue span, opens URL in default browser
+     *   [[text|uuid]]          → legacy fallback, treated as note link
      *
-     * Behavior:
-     * - Displays as styled text with links rendered as blue spans
-     * - When the cursor keyboard-enters a link token, the raw [[...]] is revealed
-     * - Clicking a link span dispatches a "navigate" event to the parent
-     * - All edits go through the contenteditable div; we parse on blur/input
+     * Editing:
+     *   - Click on a link  → navigates / opens URL  (never enters edit mode)
+     *   - Click elsewhere → contenteditable focus, raw [[...]] text revealed
+     *   - Keyboard cursor → naturally editable in focused state
      */
 
-    import { parseLinks, findLinkAtOffset } from "$lib/utils/linkParser";
+    import { parseLinks } from "$lib/utils/linkParser";
     import type { Token } from "$lib/utils/linkParser";
+    import { openUrl } from "@tauri-apps/plugin-opener";
 
     interface Props {
         blockId: string;
@@ -38,60 +42,90 @@
     // Current plain-text content (source of truth for saving)
     let plainText = $state(initialContent);
 
-    // Whether the cursor is currently inside a link token (for editing reveal)
-    let cursorInLink = $state(false);
-
-    // Tracks if we're in "edit mode" (focused) — switches rendering strategy
+    // Whether the block is actively being edited
     let isFocused = $state(false);
 
-    // On mount: set initial HTML
+    // On mount / when editorEl binds — render display HTML
     $effect(() => {
-        if (editorEl) {
-            editorEl.innerHTML = buildDisplayHtml(initialContent);
+        const el = editorEl;
+        if (el && !isFocused) {
+            el.innerHTML = buildDisplayHtml(plainText);
         }
     });
 
-    // ── Rendering ────────────────────────────────────────────────────────
+    // Re-render when notesList updates (async load) so tooltip titles are current
+    $effect(() => {
+        const _list = notesList; // reactive dependency
+        const el = editorEl;
+        if (el && !isFocused) {
+            el.innerHTML = buildDisplayHtml(plainText);
+        }
+    });
+
+    // ── Rendering ────────────────────────────────────────────────────────────
+
+    function escapeHtml(s: string): string {
+        return s
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\n/g, "<br>");
+    }
 
     function buildDisplayHtml(text: string): string {
         const tokens: Token[] = parseLinks(text);
         return tokens
             .map((tok) => {
-                if (tok.type === "text") {
-                    // Escape HTML entities but preserve newlines
-                    return tok.raw
-                        .replace(/&/g, "&amp;")
-                        .replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;")
-                        .replace(/\n/g, "<br>");
-                } else {
-                    // Resolve note title for tooltip
-                    const note = notesList.find((n) => n.noteId === tok.noteId);
-                    const title = note?.noteTitle ?? tok.display;
-                    const target = tok.blockId
-                        ? `${tok.noteId}/${tok.blockId}`
-                        : tok.noteId;
+                if (tok.type === "text") return escapeHtml(tok.raw);
+
+                // Resolve title for tooltip
+                const noteTitle = tok.noteId
+                    ? (notesList.find((n) => n.noteId === tok.noteId)
+                          ?.noteTitle ?? tok.display)
+                    : tok.display;
+
+                if (tok.linkType === "note") {
                     return `<span
-                        class="note-link"
-                        data-note-id="${tok.noteId}"
-                        data-block-id="${tok.blockId ?? ""}"
+                        class="note-link note-link--note"
+                        data-link-type="note"
+                        data-note-id="${tok.noteId ?? ""}"
                         data-raw="${encodeURIComponent(tok.raw)}"
-                        title="→ ${title}"
+                        title="→ ${noteTitle}"
                         contenteditable="false"
                     >${tok.display}</span>`;
                 }
+
+                if (tok.linkType === "block") {
+                    return `<span
+                        class="note-link note-link--block"
+                        data-link-type="block"
+                        data-note-id="${tok.noteId ?? ""}"
+                        data-block-id="${tok.blockId ?? ""}"
+                        data-raw="${encodeURIComponent(tok.raw)}"
+                        title="⚓ ${noteTitle} › block"
+                        contenteditable="false"
+                    >${tok.display}</span>`;
+                }
+
+                // web
+                return `<span
+                    class="note-link note-link--web"
+                    data-link-type="web"
+                    data-url="${encodeURIComponent(tok.url ?? "")}"
+                    data-raw="${encodeURIComponent(tok.raw)}"
+                    title="↗ ${tok.url}"
+                    contenteditable="false"
+                >${tok.display} ↗</span>`;
             })
             .join("");
     }
 
-    // ── Event Handlers ────────────────────────────────────────────────────
+    // ── Event Handlers ────────────────────────────────────────────────────────
 
     function handleFocus() {
         isFocused = true;
-        // Replace rendered HTML with raw text for editing
         if (editorEl) {
-            const raw = plainText;
-            editorEl.textContent = raw;
+            editorEl.textContent = plainText;
             // Move caret to end
             const sel = window.getSelection();
             const range = document.createRange();
@@ -104,7 +138,6 @@
 
     function handleBlur() {
         isFocused = false;
-        // Re-render links after editing
         if (editorEl) {
             const newText = editorEl.textContent ?? "";
             plainText = newText;
@@ -114,30 +147,42 @@
     }
 
     function handleInput(e: Event) {
-        // Keep our plainText in sync during editing
         const target = e.target as HTMLElement;
         plainText = target.textContent ?? "";
         onchange(blockId, plainText);
     }
 
-    function handleKeyDown(e: KeyboardEvent) {
-        if (e.key === "Enter" && !e.shiftKey) {
-            // Let parent handle Enter to create new block
-            // (when at the very end of the block)
-        }
+    function handleKeyDown(_e: KeyboardEvent) {
+        // Parent handles Enter, etc.
     }
 
-    function handleClick(e: MouseEvent) {
-        // Check if user clicked on a link span
+    function handleMouseDown(e: MouseEvent) {
+        // MUST be mousedown — focus fires before click and destroys the spans.
         const target = e.target as HTMLElement;
-        if (target.classList.contains("note-link")) {
+        if (!target.classList.contains("note-link")) return;
+
+        // Prevent focus (stay in display mode)
+        e.preventDefault();
+
+        const linkType = target.dataset.linkType;
+
+        if (linkType === "web") {
+            const url = decodeURIComponent(target.dataset.url ?? "");
+            if (url) openUrl(url).catch(console.error);
+            return;
+        }
+
+        if (linkType === "note") {
+            const noteId = target.dataset.noteId;
+            if (noteId) onnavigate(noteId, null);
+            return;
+        }
+
+        if (linkType === "block") {
             const noteId = target.dataset.noteId;
             const blkId = target.dataset.blockId || null;
-            if (noteId) {
-                e.preventDefault();
-                e.stopPropagation();
-                onnavigate(noteId, blkId ?? null);
-            }
+            if (noteId) onnavigate(noteId, blkId);
+            return;
         }
     }
 
@@ -158,7 +203,7 @@
     onblur={handleBlur}
     oninput={handleInput}
     onkeydown={handleKeyDown}
-    onclick={handleClick}
+    onmousedown={handleMouseDown}
 ></div>
 
 <style>
@@ -170,22 +215,49 @@
         line-height: 1.7;
     }
 
-    /* Link chip rendered in display mode */
+    /* ── Base chip styles ─────────────────────────────────────── */
     :global(.linked-block .note-link) {
-        color: #f97316; /* orange-500 — matches app accent */
-        border-bottom: 1px solid rgba(249, 115, 22, 0.4);
+        border-radius: 3px;
+        padding: 0 2px;
         cursor: pointer;
-        border-radius: 2px;
-        padding: 0 1px;
+        user-select: none;
+        font-weight: 500;
         transition:
             background 0.15s,
-            color 0.15s;
-        user-select: none;
+            color 0.15s,
+            border-color 0.15s;
     }
 
-    :global(.linked-block .note-link:hover) {
+    /* Note link — orange (existing accent) */
+    :global(.linked-block .note-link--note) {
+        color: #f97316;
+        border-bottom: 1px solid rgba(249, 115, 22, 0.4);
+    }
+    :global(.linked-block .note-link--note:hover) {
         background: rgba(249, 115, 22, 0.12);
-        color: #fb923c; /* orange-400 */
+        color: #fb923c;
         border-bottom-color: #f97316;
+    }
+
+    /* Block link — amber */
+    :global(.linked-block .note-link--block) {
+        color: #f59e0b;
+        border-bottom: 1px dashed rgba(245, 158, 11, 0.5);
+    }
+    :global(.linked-block .note-link--block:hover) {
+        background: rgba(245, 158, 11, 0.12);
+        color: #fbbf24;
+        border-bottom-color: #f59e0b;
+    }
+
+    /* Web link — sky blue */
+    :global(.linked-block .note-link--web) {
+        color: #38bdf8;
+        border-bottom: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    :global(.linked-block .note-link--web:hover) {
+        background: rgba(56, 189, 248, 0.1);
+        color: #7dd3fc;
+        border-bottom-color: #38bdf8;
     }
 </style>
