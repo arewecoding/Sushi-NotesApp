@@ -1,9 +1,15 @@
 <script lang="ts">
+    /**
+     * RightPanel.svelte
+     * =================
+     * Right sidebar with two tabs: Details (note metadata placeholder) and
+     * Ask AI (RAG ChatPanel). Resizable via drag handle.
+     */
     import {
         isRightPanelOpen,
         rightPanelWidth,
         rightPanelTab,
-    } from "$lib/stores/layout";
+    } from "$lib/stores/layoutStore";
     import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
     import { MessageSquare, Info } from "lucide-svelte";
 

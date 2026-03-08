@@ -8,8 +8,8 @@
  */
 
 import { writable, get } from "svelte/store";
-import { ragQuery, ragBuildIndex, ragStatus } from "../../client/ragApiClient";
-import type { RagQueryResponse, RagStatusResponse } from "../../client/ragApiClient";
+import { ragQuery, ragBuildIndex, ragStatus } from "$lib/client/ragApiClient";
+import type { RagQueryResponse, RagStatusResponse } from "$lib/client/ragApiClient";
 import { addToast } from "./toastStore";
 
 // ── Types ─────────────────────────────────────────────────────────────────

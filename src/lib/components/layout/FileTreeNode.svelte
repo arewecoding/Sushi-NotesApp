@@ -14,11 +14,8 @@
         createDirectoryIn,
         renameNoteById,
         renameDirectoryByPath,
-    } from "../../../client/apiClient";
-    import type {
-        DirectoryItem,
-        NoteListItem,
-    } from "../../../client/_apiTypes";
+    } from "$lib/client/apiClient";
+    import type { DirectoryItem, NoteListItem } from "$lib/client/_apiTypes";
     import {
         loadNote,
         activeNoteId,

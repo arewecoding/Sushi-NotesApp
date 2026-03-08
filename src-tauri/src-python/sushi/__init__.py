@@ -83,6 +83,12 @@ def setup(app_handle: AppHandle) -> None:
         LogSource.SYSTEM, LogLevel.INFO, "RAGService registered as managed state"
     )
 
+    # ── 2b. Wire FileIndex into RAGService for search title resolution ────
+    rag_service.set_file_index(vault_service.db)
+    sys_log.log(
+        LogSource.SYSTEM, LogLevel.INFO, "RAGService: FileIndex wired for search"
+    )
+
     # ── 3. Wire incremental-indexing hook ────────────────────────────────────
     # Non-invasively extend the watcher's callback so that every .jnote save
     # also triggers the RAG incremental indexer. VaultService is untouched.

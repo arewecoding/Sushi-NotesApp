@@ -35,10 +35,13 @@ class VaultEventHandler(FileSystemEventHandler):
     This acts as the ONLY writer to the DB for structure changes.
     """
 
-    def __init__(self):
-        # Injected by VaultService
-        self.db: Optional[FileIndex] = None
-        self.on_file_event_callback: Optional[Callable[[str, float], None]] = None
+    def __init__(
+        self,
+        db: FileIndex,
+        on_file_event_callback: Optional[Callable[[str, float], None]] = None,
+    ):
+        self.db = db
+        self.on_file_event_callback = on_file_event_callback
 
     def _notify_active_state(self, path: Path, mtime: float = None):
         """
@@ -296,10 +299,15 @@ class VaultEventHandler(FileSystemEventHandler):
 class VaultWatcher:
     """Manages the watchdog file system observer."""
 
-    def __init__(self, root_path: Union[str, Path]):
+    def __init__(
+        self,
+        root_path: Union[str, Path],
+        db: FileIndex,
+        on_file_event_callback: Optional[Callable[[str, float], None]] = None,
+    ):
         self.root_path = Path(root_path)
         self.observer = Observer()
-        self.handler = VaultEventHandler()
+        self.handler = VaultEventHandler(db, on_file_event_callback)
 
     def start(self):
         if not self.root_path.exists():

@@ -5,8 +5,8 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { NoteListItem, NoteContent, NoteBlock } from '../../client/_apiTypes';
-import { getSidebar, openNote, createNote, updateNoteContent, createNoteInDir, deleteNoteById, duplicateNote } from '../../client/apiClient';
+import type { NoteListItem, NoteContent, NoteBlock } from '$lib/client/_apiTypes';
+import { getSidebar, openNote, createNote, updateNoteContent, createNoteInDir, deleteNoteById, duplicateNote } from '$lib/client/apiClient';
 import { addToast } from './toastStore';
 import { refreshTree } from './fileTreeStore';
 import { listen } from '@tauri-apps/api/event';

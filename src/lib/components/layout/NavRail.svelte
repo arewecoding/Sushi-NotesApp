@@ -1,4 +1,11 @@
 <script lang="ts">
+  /**
+   * NavRail.svelte
+   * ==============
+   * Narrow left-edge navigation rail with icons for Notes, Daily Board,
+   * Calendar, Graph View, and Settings. Currently only Notes is
+   * functional; the others are placeholder buttons for future features.
+   */
   import {
     FileText,
     Calendar,

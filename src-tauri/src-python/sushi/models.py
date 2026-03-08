@@ -252,3 +252,32 @@ class RagStatusResponse(PyTauriModel):
     graph_nodes: int
     graph_edges: int
     message: str
+
+
+# ==========================================
+# Search Request / Response Models
+# ==========================================
+
+
+class SearchRequest(PyTauriModel):
+    """Search query for Tier 1 (fast) or Tier 2 (deep)."""
+
+    query: str
+    limit: int = 10
+
+
+class SearchResultItem(PyTauriModel):
+    """A single search result — either a note or a block."""
+
+    result_type: str  # "note" | "block"
+    note_id: str
+    note_title: str
+    block_id: Optional[str] = None
+    block_snippet: Optional[str] = None
+    score: Optional[float] = None
+
+
+class SearchResponse(PyTauriModel):
+    """Search results returned to the frontend."""
+
+    results: List[SearchResultItem]

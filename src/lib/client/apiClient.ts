@@ -12,10 +12,8 @@ import type {
     NoteContent,
     NoteBlock,
     OperationResponse,
-    CreateBlockRequest,
-    UpdateBlockRequest,
-    DeleteBlockRequest,
     DirectoryContents,
+    SearchResponse,
 } from "./_apiTypes";
 
 /**
@@ -76,35 +74,6 @@ export async function createNote(
     return await pyInvoke("create_note", { title }, options);
 }
 
-/**
- * Adds a new block to an open note.
- */
-export async function addBlock(
-    request: CreateBlockRequest,
-    options?: InvokeOptions
-): Promise<OperationResponse> {
-    return await pyInvoke("add_block", request, options);
-}
-
-/**
- * Updates an existing block in an open note.
- */
-export async function updateBlock(
-    request: UpdateBlockRequest,
-    options?: InvokeOptions
-): Promise<OperationResponse> {
-    return await pyInvoke("update_block", request, options);
-}
-
-/**
- * Deletes a block from an open note.
- */
-export async function deleteBlock(
-    request: DeleteBlockRequest,
-    options?: InvokeOptions
-): Promise<OperationResponse> {
-    return await pyInvoke("delete_block", request, options);
-}
 
 // ==========================================
 // File Tree CRUD Operations
@@ -204,4 +173,34 @@ export async function renameDirectoryByPath(
     options?: InvokeOptions
 ): Promise<OperationResponse> {
     return await pyInvoke("rename_directory_cmd", { dirPath, newName }, options);
+}
+
+// ==========================================
+// Search Operations
+// ==========================================
+
+
+
+/**
+ * Tier 1 — fast keyword search (titles + FTS5 block content).
+ * No embedding API calls, sub-10ms.
+ */
+export async function searchFast(
+    query: string,
+    limit: number = 10,
+    options?: InvokeOptions
+): Promise<SearchResponse> {
+    return await pyInvoke("search_fast", { query, limit }, options);
+}
+
+/**
+ * Tier 2 — deep semantic search via FAISS.
+ * Calls the Gemini embedding API (~200-600ms latency).
+ */
+export async function searchDeep(
+    query: string,
+    limit: number = 10,
+    options?: InvokeOptions
+): Promise<SearchResponse> {
+    return await pyInvoke("search_deep", { query, limit }, options);
 }

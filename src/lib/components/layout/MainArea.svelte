@@ -1,8 +1,16 @@
 <script lang="ts">
+    /**
+     * MainArea.svelte
+     * ================
+     * The core note editor component. Manages the note title, block list,
+     * toolbar formatting dispatch, block CRUD operations (create, delete,
+     * move, reorder), and content synchronisation with the backend via
+     * debounced saves. Uses non-reactive plain JS (blockContents) for
+     * editing performance, syncing to Svelte stores only on save.
+     */
     import {
         Bold,
         Italic,
-        Link,
         List,
         Strikethrough,
         Code,
@@ -17,7 +25,7 @@
         PanelLeftClose,
         Loader2,
     } from "lucide-svelte";
-    import { isRightPanelOpen, isLeftPanelOpen } from "$lib/stores/layout";
+    import { isRightPanelOpen, isLeftPanelOpen } from "$lib/stores/layoutStore";
     import {
         activeNoteContent,
         isLoadingNote,
@@ -28,13 +36,19 @@
         notesList,
         loadNote,
     } from "$lib/stores/notesStore";
-    import type { NoteBlock } from "../../../client/_apiTypes";
+    import type { NoteBlock } from "$lib/client/_apiTypes";
     import BlockToolbar from "$lib/components/editor/BlockToolbar.svelte";
     import BlockInserter from "$lib/components/editor/BlockInserter.svelte";
     import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
     import RichTextBlock from "$lib/components/editor/RichTextBlock.svelte";
     import LaTeXBlock from "$lib/components/editor/LaTeXBlock.svelte";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+    import {
+        FOCUS_BLUR_DELAY_MS,
+        NAVIGATE_SCROLL_DELAY_MS,
+        latexSnippets,
+    } from "$lib/editor/editorConstants";
+    import { createBlock } from "$lib/editor/blockFactory";
     import {
         dragBlockIndex,
         dropTargetIndex,
@@ -48,7 +62,7 @@
     let initializedNoteId: string | null = null;
     let lastInitializedVersion: number = 0;
 
-    // Non-reactive storage for block content during editing
+    // ── Non-reactive block contents ────────────────────────────────────────
     // This is PLAIN JS - not $state() - so mutations don't trigger re-renders
     let blockContents: Record<string, string> = {};
     let currentTitle: string = "";
@@ -87,7 +101,7 @@
             if (!document.activeElement?.closest(".editor-content-area")) {
                 focusedBlock = null;
             }
-        }, 150);
+        }, FOCUS_BLUR_DELAY_MS);
     }
 
     /** Dispatch a format action to the currently focused text/todo block */
@@ -103,34 +117,6 @@
         const ref = blockRefs[focusedBlock.id];
         ref?.insertSnippet?.(snippet);
     }
-
-    /** LaTeX snippet definitions for the toolbar */
-    const latexSnippets: Array<{
-        label: string;
-        title: string;
-        snippet: string;
-        sep?: boolean;
-    }> = [
-        { label: "√", title: "Square root", snippet: "\\sqrt{}" },
-        { label: "½", title: "Fraction", snippet: "\\frac{}{}" },
-        { label: "∫", title: "Integral", snippet: "\\int_{a}^{b}" },
-        { label: "Σ", title: "Summation", snippet: "\\sum_{i=1}^{n}" },
-        { label: "lim", title: "Limit", snippet: "\\lim_{x \\to \\infty}" },
-        { label: "", title: "", snippet: "", sep: true },
-        { label: "x²", title: "Superscript", snippet: "^{}" },
-        { label: "x₂", title: "Subscript", snippet: "_{}" },
-        {
-            label: "⊞",
-            title: "Matrix (2×2)",
-            snippet: "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}",
-        },
-        { label: "", title: "", snippet: "", sep: true },
-        { label: "α", title: "Alpha", snippet: "\\alpha" },
-        { label: "β", title: "Beta", snippet: "\\beta" },
-        { label: "π", title: "Pi", snippet: "\\pi" },
-        { label: "θ", title: "Theta", snippet: "\\theta" },
-        { label: "∞", title: "Infinity", snippet: "\\infty" },
-    ];
 
     // Watch for note changes and initialize ONCE per note
     // Also handles external updates via noteContentVersion
@@ -169,11 +155,7 @@
                 }
 
                 // Trigger re-render to show the new blocks
-                showBlocks = false;
-                // Use microtask to ensure DOM updates
-                queueMicrotask(() => {
-                    showBlocks = true;
-                });
+                rerenderBlocks();
             }
         }
     });
@@ -216,7 +198,7 @@
         await loadNote(noteId);
         if (blockId) {
             // Wait for DOM then scroll to block
-            await new Promise((r) => setTimeout(r, 150));
+            await new Promise((r) => setTimeout(r, NAVIGATE_SCROLL_DELAY_MS));
             const el = document.querySelector(`[data-block-id="${blockId}"]`);
             if (el instanceof HTMLElement) {
                 el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -243,26 +225,12 @@
 
     // ========== Block Operations ==========
 
-    function generateBlockId(): string {
-        return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    }
-
-    function createBlock(type: string): NoteBlock {
-        return {
-            blockId: generateBlockId(),
-            type,
-            data:
-                type === "code"
-                    ? { code: "" }
-                    : type === "todo"
-                      ? { content: "", checked: false }
-                      : type === "latex"
-                        ? { content: "" }
-                        : { content: "" },
-            version: "1",
-            tags: [],
-            backlinks: [],
-        };
+    /** Force a Svelte re-render of the block list via a destroy/recreate cycle. */
+    function rerenderBlocks() {
+        showBlocks = false;
+        queueMicrotask(() => {
+            showBlocks = true;
+        });
     }
 
     function insertBlockAt(index: number, type: string = "text") {
@@ -275,9 +243,8 @@
         blockContents[newBlock.blockId] = "";
 
         // Re-render and save
-        showBlocks = false;
+        rerenderBlocks();
         queueMicrotask(() => {
-            showBlocks = true;
             // Focus the new block after render
             queueMicrotask(() => {
                 const el = document.querySelector(
@@ -315,10 +282,7 @@
         hoveredBlockId = null;
 
         // Re-render and save
-        showBlocks = false;
-        queueMicrotask(() => {
-            showBlocks = true;
-        });
+        rerenderBlocks();
         triggerSave();
     }
 
@@ -333,10 +297,7 @@
         [copy[idx], copy[targetIdx]] = [copy[targetIdx], copy[idx]];
         currentBlocks = copy;
 
-        showBlocks = false;
-        queueMicrotask(() => {
-            showBlocks = true;
-        });
+        rerenderBlocks();
         triggerSave();
     }
 
@@ -347,10 +308,7 @@
         copy.splice(toIndex, 0, moved);
         currentBlocks = copy;
 
-        showBlocks = false;
-        queueMicrotask(() => {
-            showBlocks = true;
-        });
+        rerenderBlocks();
         triggerSave();
     }
 

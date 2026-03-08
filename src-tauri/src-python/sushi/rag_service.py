@@ -111,6 +111,7 @@ class RAGService:
         self._pipeline: Optional[RAGPipeline] = None
         self._enabled = False
         self._error_message = ""
+        self._file_index = None  # Set later via set_file_index()
 
         if not _RAG_AVAILABLE:
             self._error_message = (
@@ -149,6 +150,10 @@ class RAGService:
             self._error_message = f"RAGService init failed: {e}"
             sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, self._error_message)
             self._enabled = False
+
+    def set_file_index(self, file_index) -> None:
+        """Store a reference to VaultService's FileIndex for note title lookups."""
+        self._file_index = file_index
 
     # ------------------------------------------------------------------
     # Config resolution
@@ -384,8 +389,174 @@ class RAGService:
             )
 
     # ------------------------------------------------------------------
+    # Search API (Tier 1 fast + Tier 2 deep)
+    # ------------------------------------------------------------------
+
+    def search_fast(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Tier 1 — fast keyword search.
+
+        Returns up to `limit` results combining:
+          1. Note title matches from FileIndex (LIKE query)
+          2. Block content matches from RAGDatabase FTS5
+
+        No embedding API calls — pure SQLite, sub-10ms.
+        """
+        results: list[dict[str, Any]] = []
+        seen_note_ids: set[str] = set()
+
+        # ── 1. Note title matches (from FileIndex / cache_db) ────────────
+        if self._file_index is not None:
+            try:
+                all_notes = self._file_index.get_all_notes()
+                query_lower = query.lower()
+                for note_meta in all_notes:
+                    if query_lower in note_meta.note_title.lower():
+                        results.append(
+                            {
+                                "result_type": "note",
+                                "note_id": note_meta.note_id,
+                                "note_title": note_meta.note_title,
+                                "block_id": None,
+                                "block_snippet": None,
+                                "score": 1.0,
+                            }
+                        )
+                        seen_note_ids.add(note_meta.note_id)
+                        if len(results) >= limit:
+                            break
+            except Exception as e:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.WARNING,
+                    f"Search: title lookup failed: {e}",
+                )
+
+        # ── 2. Block content matches (FTS5 from RAG database) ────────────
+        if len(results) < limit and self._pipeline is not None:
+            try:
+                fts_rows = self._pipeline.db.fts_search(query, limit=limit * 3)
+                for row in fts_rows:
+                    note_id = row["note_id"]
+                    # If we already have this note from title match, skip
+                    if note_id in seen_note_ids:
+                        continue
+
+                    # Resolve note title from FileIndex
+                    note_title = self._resolve_note_title(note_id)
+                    snippet = self._strip_markdown(row["content"])[:120]
+
+                    results.append(
+                        {
+                            "result_type": "block",
+                            "note_id": note_id,
+                            "note_title": note_title,
+                            "block_id": row["block_id"],
+                            "block_snippet": snippet,
+                            "score": abs(row["fts_score"])
+                            if "fts_score" in row.keys()
+                            else 0.0,
+                        }
+                    )
+                    seen_note_ids.add(note_id)
+
+                    if len(results) >= limit:
+                        break
+            except Exception as e:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.WARNING,
+                    f"Search: FTS5 search failed: {e}",
+                )
+
+        return results[:limit]
+
+    def search_deep(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Tier 2 — deep semantic search via FAISS.
+
+        Embeds the query using the Gemini API, then searches the FAISS index
+        for the most similar blocks. ~200-600ms latency due to API call.
+        """
+        if not self._enabled or self._pipeline is None:
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen_note_ids: set[str] = set()
+
+        with self._lock:
+            try:
+                # FAISS semantic search
+                semantic_hits = self._pipeline.embedding_manager.search(
+                    query, k=limit * 3
+                )
+
+                for block_id, score in semantic_hits:
+                    block = self._pipeline.db.get_block(block_id)
+                    if block is None:
+                        continue
+
+                    note_id = block["note_id"]
+                    if note_id in seen_note_ids:
+                        continue
+
+                    note_title = self._resolve_note_title(note_id)
+                    snippet = self._strip_markdown(block["content"])[:120]
+
+                    results.append(
+                        {
+                            "result_type": "block",
+                            "note_id": note_id,
+                            "note_title": note_title,
+                            "block_id": block_id,
+                            "block_snippet": snippet,
+                            "score": round(float(score), 4),
+                        }
+                    )
+                    seen_note_ids.add(note_id)
+
+                    if len(results) >= limit:
+                        break
+
+            except Exception as e:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.ERROR,
+                    f"Search deep failed: {e}",
+                )
+
+        return results[:limit]
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_note_title(self, note_id: str) -> str:
+        """Look up a note title from FileIndex, falling back to 'Untitled'."""
+        if self._file_index is not None:
+            try:
+                meta = self._file_index.get_metadata(note_id)
+                if meta:
+                    return meta.note_title
+            except Exception:
+                pass
+        return "Untitled Note"
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove common markdown syntax for cleaner plain-text snippets."""
+        import re as _re
+
+        text = _re.sub(r"#{1,6}\s+", "", text)  # headings
+        text = _re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # bold
+        text = _re.sub(r"\*(.+?)\*", r"\1", text)  # italic
+        text = _re.sub(r"~~(.+?)~~", r"\1", text)  # strikethrough
+        text = _re.sub(r"`(.+?)`", r"\1", text)  # inline code
+        text = _re.sub(r"^\s*[-*+]\s+", "", text, flags=_re.MULTILINE)  # list markers
+        text = _re.sub(r"^\s*>\s+", "", text, flags=_re.MULTILINE)  # blockquotes
+        text = _re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # links
+        text = _re.sub(r"\n{2,}", " ", text)  # multiple newlines
+        return text.strip()
 
     def _disabled_response(self, query_text: str) -> dict[str, Any]:
         return {

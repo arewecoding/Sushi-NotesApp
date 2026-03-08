@@ -127,6 +127,25 @@ export interface RenameDirectoryRequest {
     newName: string;
 }
 
+// Search types
+export interface SearchRequest {
+    query: string;
+    limit?: number;
+}
+
+export interface SearchResultItem {
+    resultType: string;   // "note" | "block"
+    noteId: string;
+    noteTitle: string;
+    blockId?: string | null;
+    blockSnippet?: string | null;
+    score?: number | null;
+}
+
+export interface SearchResponse {
+    results: SearchResultItem[];
+}
+
 // Commands interface for type-safe API calls
 export interface Commands {
     get_directory_contents: {
@@ -196,5 +215,13 @@ export interface Commands {
     rename_directory_cmd: {
         input: RenameDirectoryRequest;
         output: OperationResponse;
+    };
+    search_fast: {
+        input: SearchRequest;
+        output: SearchResponse;
+    };
+    search_deep: {
+        input: SearchRequest;
+        output: SearchResponse;
     };
 }

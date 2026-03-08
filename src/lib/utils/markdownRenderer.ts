@@ -55,7 +55,10 @@ function linkToHtml(
 }
 
 /**
- * Full render for view mode: markdown → KaTeX → links.
+ * Full render for view mode — now uses line-by-line rendering to avoid
+ * cross-line markdown behaviour (e.g. blockquotes bleeding into next line).
+ * Each line becomes a <div class="md-line"> with rendered HTML and a
+ * data-raw attribute preserving the original markdown.
  */
 export function renderViewHtml(
     rawText: string,
@@ -63,41 +66,28 @@ export function renderViewHtml(
 ): string {
     if (!rawText.trim()) return "";
 
-    // 1. Extract [[links]] → placeholders so marked doesn't mangle them
-    const linkRaws: string[] = [];
-    let text = rawText.replace(/\[\[[^\]]+\]\]/g, (m) => {
-        const i = linkRaws.push(m) - 1;
-        return `LNKPH${i}END`;
-    });
-
-    // 2. Markdown → HTML
-    let html = marked.parse(text) as string;
-
-    // 3. KaTeX — display ($$) before inline ($)
-    html = html.replace(/\$\$([^$]+?)\$\$/gs, (_, m) => renderKatex(m, true));
-    html = html.replace(/\$([^$\n]+?)\$/g, (_, m) => renderKatex(m, false));
-
-    // 4. Restore links
-    html = html.replace(/LNKPH(\d+)END/g, (_, i) =>
-        linkToHtml(linkRaws[Number(i)], notesList)
-    );
-
-    return html;
+    return rawText
+        .split("\n")
+        .map((line) => {
+            const html = renderLineHtml(line, notesList);
+            const enc = encodeURIComponent(line);
+            return `<div class="md-line" data-raw="${enc}">${html}</div>`;
+        })
+        .join("");
 }
 
 // ── Edit-mode: per-line renderer (Obsidian approach) ────────────────────────
 
 /**
  * Render a single raw markdown line to HTML — no <p> wrapper.
- * Used in Obsidian-style edit mode where each line can be independently
- * rendered or shown as raw syntax when the cursor is on it.
+ * Used in both view mode (via renderViewHtml) and edit mode.
  */
 export function renderLineHtml(
     line: string,
     notesList: Array<{ noteId: string; noteTitle: string }>
 ): string {
-    // Blank line — keep height with a non-breaking space
-    if (!line.trim()) return "\u00A0";
+    // Blank line — <br> preserves height without adding visible characters
+    if (!line.trim()) return "<br>";
 
     // Extract [[links]] → placeholders before marked touches them
     const linkRaws: string[] = [];

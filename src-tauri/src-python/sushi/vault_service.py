@@ -329,7 +329,7 @@ class ActiveNote:
             return
 
         # Guard: tell VaultService we're saving so watchdog events are suppressed
-        self.service._saving_note_ids.add(self.note_id)
+        self.service.mark_saving(self.note_id)
         try:
             new_mtime = update_note(self.service.db, self.note_obj)
             if new_mtime:
@@ -341,7 +341,7 @@ class ActiveNote:
                     f"Auto-saved: {self.note_obj.metadata.title}",
                 )
         finally:
-            self.service._saving_note_ids.discard(self.note_id)
+            self.service.unmark_saving(self.note_id)
 
     def close(self, skip_save: bool = False):
         """Cancel pending timers. Flush save unless skip_save (e.g. file was deleted)."""
@@ -370,7 +370,7 @@ class VaultService:
 
         # Core components
         self.db = FileIndex()
-        self.watcher = VaultWatcher(self.vault_path)
+        self.watcher = VaultWatcher(self.vault_path, self.db, self.on_file_event)
         self.file_tree = ActiveFileTree(app_handle)
 
         # Active notes registry
@@ -378,10 +378,6 @@ class VaultService:
 
         # Guard: note_ids currently being saved (suppress watchdog events)
         self._saving_note_ids: set = set()
-
-        # Wire up the event handler
-        self.watcher.handler.db = self.db
-        self.watcher.handler.on_file_event_callback = self.on_file_event
 
         sys_log.log(
             LogSource.SYSTEM,
@@ -399,6 +395,14 @@ class VaultService:
         self.watcher.scan(self.db)
         self.watcher.start()
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "VaultService started.")
+
+    def mark_saving(self, note_id: str):
+        """Register a note_id as currently being saved (suppresses watchdog echoes)."""
+        self._saving_note_ids.add(note_id)
+
+    def unmark_saving(self, note_id: str):
+        """Unregister a note_id from the saving guard set."""
+        self._saving_note_ids.discard(note_id)
 
     def stop(self):
         """Stops file watching and closes all active notes."""
@@ -645,5 +649,7 @@ class VaultService:
 
     def create_directory_in(self, parent_path: str, dir_name: str) -> bool:
         """Creates a subdirectory. Watcher triggers tree refresh."""
-        result = filesys_create_directory(parent_path, dir_name)
+        # Empty parent_path means vault root — Path("") would resolve to CWD
+        resolved_parent = parent_path if parent_path else str(self.vault_path)
+        result = filesys_create_directory(resolved_parent, dir_name)
         return result is not None

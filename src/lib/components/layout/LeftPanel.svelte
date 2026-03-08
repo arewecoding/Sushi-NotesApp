@@ -1,17 +1,24 @@
 <script lang="ts">
+  /**
+   * LeftPanel.svelte
+   * ================
+   * File explorer sidebar: header with New Note/Folder/Search buttons,
+   * the FileTreeNode tree, right-click context menu, resizable width,
+   * and mouse-based file drag-and-drop handling.
+   */
   import { Plus, FolderPlus, Search } from "lucide-svelte";
   import {
     leftPanelWidth,
     isLeftPanelOpen,
     isSearchOpen,
-  } from "$lib/stores/layout";
+  } from "$lib/stores/layoutStore";
   import { createAndOpenNote } from "$lib/stores/notesStore";
   import { refreshTree, selectedDirPath } from "$lib/stores/fileTreeStore";
   import {
     moveItem,
     moveNoteById,
     createDirectoryIn,
-  } from "../../../client/apiClient";
+  } from "$lib/client/apiClient";
   import { addToast } from "$lib/stores/toastStore";
   import {
     dragItem,

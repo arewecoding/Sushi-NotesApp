@@ -1,13 +1,13 @@
-# Vadapav — Search Implementation Spec
+# Sushi — Search Implementation Spec
 **For:** Antigravity  
-**Project:** Vadapav (local-first, block-based note-taking app)  
+**Project:** Sushi (local-first, block-based note-taking app)  
 **Stack:** PyTauri backend · Svelte frontend · GraphDB + FAISS block embeddings  
 
 ---
 
 ## 1. Overview
 
-This document specifies the full implementation of the global search modal in Vadapav. The current modal is a visual placeholder. This spec covers the backend query architecture, the two-tier search model, the frontend interaction design, and all edge cases.
+This document specifies the full implementation of the global search modal in Sushi. The current modal is a visual placeholder. This spec covers the backend query architecture, the two-tier search model, the frontend interaction design, and all edge cases.
 
 The search modal is triggered via the existing UI (nav bar icon, keyboard shortcut). The same modal component is also reused for the linking flow — refer to the **Linking UX Spec** for that context. This document covers search as a standalone feature.
 

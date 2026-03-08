@@ -39,6 +39,9 @@ from sushi.models import (
     RagBuildIndexRequest,
     RagBuildIndexResponse,
     RagStatusResponse,
+    SearchRequest,
+    SearchResultItem,
+    SearchResponse,
 )
 from sushi.logger import sys_log, LogSource, LogLevel
 
@@ -497,3 +500,50 @@ async def rag_status(app_handle: AppHandle) -> RagStatusResponse:
             graph_edges=0,
             message=str(e),
         )
+
+
+# ==========================================
+# Search Commands
+# ==========================================
+
+
+@commands.command()
+async def search_fast(body: SearchRequest, app_handle: AppHandle) -> SearchResponse:
+    """
+    Tier 1 — fast keyword search (titles + FTS5 block content).
+    No embedding API calls, sub-10ms.
+    """
+    try:
+        rag_service: RAGService = Manager.state(app_handle, RAGService)
+        results = rag_service.search_fast(body.query, body.limit)
+        sys_log.log(
+            LogSource.API,
+            LogLevel.DEBUG,
+            f"search_fast: query='{body.query}' results={len(results)}",
+        )
+        return SearchResponse(results=[SearchResultItem(**r) for r in results])
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"search_fast failed: {e}")
+        return SearchResponse(results=[])
+
+
+@commands.command()
+async def search_deep(body: SearchRequest, app_handle: AppHandle) -> SearchResponse:
+    """
+    Tier 2 — deep semantic search via FAISS.
+    Runs in a background thread because it calls the Gemini embedding API.
+    """
+    try:
+        rag_service: RAGService = Manager.state(app_handle, RAGService)
+        results = await asyncio.to_thread(
+            rag_service.search_deep, body.query, body.limit
+        )
+        sys_log.log(
+            LogSource.API,
+            LogLevel.DEBUG,
+            f"search_deep: query='{body.query}' results={len(results)}",
+        )
+        return SearchResponse(results=[SearchResultItem(**r) for r in results])
+    except Exception as e:
+        sys_log.log(LogSource.API, LogLevel.ERROR, f"search_deep failed: {e}")
+        return SearchResponse(results=[])

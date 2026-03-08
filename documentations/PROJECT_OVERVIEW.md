@@ -1,69 +1,105 @@
-# Vadapav - Project Overview & Context
+# Project Overview: Sushi Notes App
 
-## 1. Project Identity
-**Name:** Vadapav
-**Type:** AI-Augmented Desktop Note-Taking App
-**Core Value:** Local-first, block-based, high-performance knowledge management with TUI-inspired aesthetics.
+## 1. Introduction
+**Sushi** is a high-performance, local-first note-taking application built with **PyTauri**. It combines the performance and security of **Rust/Tauri** with the flexibility of **Python** for the backend logic, and offers a modern, reactive user interface using **SvelteKit**.
+
+**Core Philosophy:**
+- **Local-First:** All data is stored as plain JSON files (`.jnote`) on the user's disk.
+- **Sidecarless:** Python is embedded directly into the Rust process memory (via `pyo3`/`pytauri`), avoiding the latency of standard sidecar subprocesses.
+- **Reactive:** The app uses a file watcher to stay in sync with the filesystem in real-time.
 
 ## 2. Technology Stack
--   **Frontend Framework:** Svelte 5 (Runes mode)
--   **Language:** TypeScript
--   **Build Tool:** Vite
--   **Styling:** TailwindCSS v4 (using `@tailwindcss/postcss`)
--   **Icons:** Lucide Svelte
 
-## 3. Project Structure
-The project follows a standard Vite + Svelte structure with a component-based architecture.
+### Frontend
+- **Framework:** SvelteKit (Svelte 5)
+- **Language:** TypeScript
+- **Styling:** TailwindCSS v4
+- **Icons:** Lucide-Svelte
+- **Build Tool:** Vite
 
-```text
+### Backend (The "PyTauri" Bridge)
+- **Framework:** Tauri v2
+- **Core:** Rust
+- **Scripting:** Python 3.x (embedded)
+- **IPC:** Custom PyTauri plugin (`tauri-plugin-pytauri-api`) for frontend-to-python communication.
+
+### Python Environment
+- **Dependency Manager:** `uv` (implied by `uv.lock`) or standard pip.
+- **Key Libraries:** `watchdog` (filesystem events), `pydantic` (validation), `anyio` (async I/O).
+
+## 3. Directory Structure
+
+```
 /
-├── public/              # Static assets
-├── src/
-│   ├── assets/          # Images/SVGs
+├── src-tauri/               # Rust/Tauri Backend Context
+│   ├── src/lib.rs           # Rust entry point (initializes Python)
+│   ├── tauri.conf.json      # Tauri Configuration
+│   └── ...
+├── src/                     # SvelteKit Frontend
+│   ├── routes/+page.svelte  # Main Entry Point
 │   ├── lib/
-│   │   └── components/
-│   │       └── layout/  # Core Layout Components
-│   │           ├── NavRail.svelte    # Extreme Left: App Navigation (Notes, Calendar, etc.)
-│   │           ├── LeftPanel.svelte  # Left: File Explorer & Secondary Nav
-│   │           ├── MainArea.svelte   # Center: Editor & Toolbar
-│   │           └── RightPanel.svelte # Right: Metadata & Context
-│   ├── App.svelte       # Root Layout Orchestrator
-│   ├── app.css          # Global Styles (& Tailwind Entry)
-│   └── main.ts          # Entry Point
-├── package.json         # Dependencies & Scripts
-├── postcss.config.js    # Tailwind v4 Configuration
-├── tailwind.config.js   # (Legacy/Optional - v4 uses CSS config)
-└── vite.config.ts       # Vite Configuration
+│   │   ├── components/      # UI Components (Editor, Layout, etc.)
+│   │   ├── stores/          # Svelte Stores (State Management)
+│   │   └── ...
+│   └── ...
+├── Notes App Python Modules/# CURRENT Python Source Code
+│   ├── active_state.py      # Core Logic (VaultService, ActiveNote)
+│   ├── filesys.py           # Watchdog & File I/O
+│   ├── note_schema.py       # Pydantic Models (JNote)
+│   └── ...
+├── PyTauri Backend Architecture Consultation.md  # ARCHITECTURE ROADMAP (Critical Read)
+├── package.json             # Frontend Dependencies
+├── Cargo.toml               # Rust Dependencies
+└── ...
 ```
 
-## 4. Key Components Breakdown
+## 4. Architecture & State Management
 
-### Layout Architecture (`src/App.svelte`)
-The app uses a 4-column layout orchestrated by Flexbox/Grid:
-1.  **NavRail** (`w-16`): High-level mode switching.
-2.  **LeftPanel** (`w-64`): Context-specific navigation (File Tree).
-3.  **MainArea** (`flex-grow`): The actual workspace (Note Editor).
-4.  **RightPanel** (`w-64`): Auxiliary details (Metadata, Backlinks).
+### Current Implementation ("Monolithic Service")
+*Note: The codebase currently interacts heavily with `active_state.py`.*
 
-### Styling System
--   **Theme:** Dark Mode Default (`bg-neutral-900`, `text-neutral-100`).
--   **Font:** Monospace (`font-mono`) to mimic a Terminal User Interface (TUI).
--   **Design Tokens:**
-    -   Backgrounds: `neutral-900` (Main), `neutral-800` (Secondary/Hover).
-    -   Borders: `neutral-800` (Subtle dividers).
-    -   Text: `neutral-100` (Primary), `neutral-400` (Muted).
+- **VaultService (`active_state.py`):** The "God Object" that manages:
+    - **Active Notes:** In-memory representation of open files.
+    - **File Watcher:** Instantiated from `filesys.py`.
+    - **Database:** An in-memory SQLite index (`cache_db.py`) for sidebar navigation.
+- **ActiveNote:** Representative of a single open note. Handles "Hot-Swapping" (reloading from disk if external changes occur) and "Echo Suppression" (ignoring events caused by its own saves).
+- **Frontend Interfacing:** The frontend talks to Python via Tauri Commands which route to methods in `ActiveNote` or `VaultService`.
 
-## 5. Current State
--   **Phase:** UI Skeleton & Layout Verification.
--   **Completed:**
-    -   Project scaffolding (Svelte 5 + Vite).
-    -   TailwindCSS v4 implementation.
-    -   Core layout components created and assembled.
--   **Next Steps:**
-    -   Implement interactive File Tree logic.
-    -   Build the TipTap-based Block Editor.
-    -   Integrate backend (Tauri) IPC bridge.
+### Future Architecture ("Clean/Hexagonal")
+*Refer to `PyTauri Backend Architecture Consultation.md`.*
+The project is aiming to migrate to a Clean Architecture with:
+- **Domain Layer:** Pure Python entities (`Note`, `Block`).
+- **Infrastructure Layer:** Repositories for FileSystem and SQLite.
+- **Dependency Injection:** To decouple services.
+- **CQRS:** Separating Read (Sidebar) from Write (Editor) operations.
+**Start generic refactoring or new features with this goal in mind.**
 
-## 6. Commands
--   **Dev Server:** `npm run dev`
--   **Build:** `npm run build`
+## 5. Key Features Implementation Details
+
+- **Block Editor (`MainArea.svelte`):**
+  - Notes are composed of "Blocks" (text, code, todo).
+  - Uses a non-reactive local state `blockContents` for performance, syncing to Svelte stores only on save/change events.
+  - Implements its own Drag-and-Drop system for block reordering.
+
+- **Filesystem Sync:**
+  - `filesys.py` runs a `watchdog` observer.
+  - Changes on disk (e.g., from VS Code or Dropbox) trigger `on_modified` events.
+  - `ActiveNote` checks the timestamp. If the change was external, it reloads the note content in real-time (Hot-Swap).
+
+## 6. Development Setup
+
+1.  **Install Dependencies:**
+    - Frontend: `pnpm install`
+    - Rust: Ensure `cargo` is installed.
+    - Python: Ensure a compatible Python version is available (project uses `uv` for management).
+
+2.  **Run Development Server:**
+    ```bash
+    pnpm tauri dev
+    ```
+    This starts the Vite server and the Tauri application window.
+
+## 7. Useful Constraints for AI
+- **OS:** Windows (Primary development environment).
+- **Path Handling:** Be careful with file paths. Use `pathlib` in Python and avoid hardcoding user strings (though some exist in legacy code).
+- **Concurrency:** Python runs in a separate thread from Rust but shares memory. Be mindful of the GIL and use `active_state.py`'s locking mechanisms (`threading.Lock`) when modifying state.
