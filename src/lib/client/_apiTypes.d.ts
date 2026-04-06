@@ -44,9 +44,17 @@ export interface DirectoryItem {
     dirName: string;
 }
 
+export interface CanvasFileItem {
+    fileId: string;
+    title: string;
+    fileType: string; // 'jcanvas' | 'jbook'
+    filePath: string;
+}
+
 export interface DirectoryContents {
     subdirs: DirectoryItem[];
     notes: NoteListItem[];
+    canvasFiles: CanvasFileItem[];
 }
 
 export interface GetDirectoryRequest {
@@ -146,6 +154,34 @@ export interface SearchResponse {
     results: SearchResultItem[];
 }
 
+// Settings types
+export interface AppSettings {
+    vaultPath: string;
+    googleApiKey: string;       // masked
+    googleApiKeySet: boolean;
+    embeddingModel: string;
+    llmModel: string;
+    autoSaveDelay: number;
+    ragEnabled: boolean;
+    faissVectors: number;
+    graphNodes: number;
+    graphEdges: number;
+}
+
+export interface SaveSettingsRequest {
+    vaultPath?: string | null;
+    googleApiKey?: string | null;
+    embeddingModel?: string | null;
+    llmModel?: string | null;
+    autoSaveDelay?: number | null;
+}
+
+export interface SaveSettingsResponse {
+    success: boolean;
+    message: string;
+    restartRequired: boolean;
+}
+
 // Commands interface for type-safe API calls
 export interface Commands {
     get_directory_contents: {
@@ -223,5 +259,13 @@ export interface Commands {
     search_deep: {
         input: SearchRequest;
         output: SearchResponse;
+    };
+    get_settings: {
+        input: null;
+        output: AppSettings;
+    };
+    save_settings: {
+        input: SaveSettingsRequest;
+        output: SaveSettingsResponse;
     };
 }

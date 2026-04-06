@@ -14,6 +14,8 @@ import type {
     OperationResponse,
     DirectoryContents,
     SearchResponse,
+    AppSettings,
+    SaveSettingsResponse,
 } from "./_apiTypes";
 
 /**
@@ -203,4 +205,71 @@ export async function searchDeep(
     options?: InvokeOptions
 ): Promise<SearchResponse> {
     return await pyInvoke("search_deep", { query, limit }, options);
+}
+
+// ── Settings ────────────────────────────────────────────────────────────
+
+/**
+ * Fetch current application settings.
+ */
+export async function getSettings(
+    options?: InvokeOptions
+): Promise<AppSettings> {
+    return await pyInvoke("get_settings", null, options);
+}
+
+/**
+ * Save application settings.
+ */
+export async function saveSettings(
+    settings: {
+        vaultPath?: string | null;
+        googleApiKey?: string | null;
+        embeddingModel?: string | null;
+        llmModel?: string | null;
+        autoSaveDelay?: number | null;
+    },
+    options?: InvokeOptions
+): Promise<SaveSettingsResponse> {
+    return await pyInvoke("save_settings", settings, options);
+}
+
+/**
+ * Fetches the absolute path of a `.sushi-resources` file and returns it as a Tauri asset:// URL.
+ * Enables local files to load in `<img>` tags on the frontend.
+ */
+export async function getResourcePath(
+    noteId: string, 
+    filename: string,
+    blockId?: string,
+    blockData?: object,
+    options?: InvokeOptions
+): Promise<string | { status: 'regeneration_required', canvasData: any, lastViewport: any } | null> {
+    const res = await pyInvoke("get_resource_path_cmd", { noteId, filename, blockId, blockData }, options);
+    // Backend returns ok(result) → {status: "ok", data: {status: "ok", path: "..."}}
+    // OR {status: "ok", data: {status: "regeneration_required", canvas_data: ..., last_viewport: ...}}
+    const data = (res as any)?.data;
+    
+    if (data?.status === 'regeneration_required') {
+        return {
+            status: 'regeneration_required',
+            canvasData: data.canvas_data,
+            lastViewport: data.last_viewport
+        };
+    }
+    
+    return data?.path || null;
+}
+
+/**
+ * Creates a structural block on the backend, saves it into the active note,
+ * and returns the populated schema back to the frontend.
+ */
+export async function createBlockCmd(
+    noteId: string,
+    blockType: string,
+    contentData: object = {},
+    options?: InvokeOptions
+): Promise<any | null> {
+    return await pyInvoke("create_block_cmd", { noteId, blockType, contentData }, options);
 }

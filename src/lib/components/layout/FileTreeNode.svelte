@@ -5,6 +5,8 @@
         Folder,
         FileText,
         Loader2,
+        PenLine,
+        BookOpen,
     } from "lucide-svelte";
     import {
         getDirectoryContents,
@@ -15,7 +17,7 @@
         renameNoteById,
         renameDirectoryByPath,
     } from "$lib/client/apiClient";
-    import type { DirectoryItem, NoteListItem } from "$lib/client/_apiTypes";
+    import type { DirectoryItem, NoteListItem, CanvasFileItem } from "$lib/client/_apiTypes";
     import {
         loadNote,
         activeNoteId,
@@ -36,6 +38,8 @@
     import ContextMenu from "../ContextMenu.svelte";
     import ConfirmDialog from "../ConfirmDialog.svelte";
     import FileTreeNode from "./FileTreeNode.svelte";
+    import { openFile } from "$lib/stores/viewStore";
+    import { canvasInvoke } from "$lib/client/canvasApi";
 
     interface Props {
         path: string | null;
@@ -52,15 +56,19 @@
     let isLoaded = $state(false);
     let subdirs = $state<DirectoryItem[]>([]);
     let notes = $state<NoteListItem[]>([]);
+    let canvasFiles = $state<CanvasFileItem[]>([]);
 
     // Context menu state
     let contextMenu = $state<{
         x: number;
         y: number;
-        type: "note" | "dir" | "empty";
+        type: "note" | "dir" | "empty" | "canvas";
         noteId?: string;
         notePath?: string;
         dirPath?: string;
+        canvasFileId?: string;
+        canvasFilePath?: string;
+        canvasFileTitle?: string;
     } | null>(null);
 
     // Confirm dialog state
@@ -73,9 +81,12 @@
 
     // Rename state
     let renamingItem = $state<{
-        type: "note" | "dir";
-        id: string; // noteId or dirPath
+        type: "note" | "dir" | "canvas";
+        id: string; // noteId, dirPath, or fileId
         value: string; // current edit value
+        // For canvas renames only:
+        filePath?: string;
+        extension?: string;
     } | null>(null);
     let renameInputRef: HTMLInputElement | null = null;
 
@@ -102,6 +113,7 @@
             const contents = await getDirectoryContents(path);
             subdirs = contents.subdirs;
             notes = contents.notes;
+            canvasFiles = contents.canvasFiles || [];
             isLoaded = true;
         } catch (error) {
             console.error("Failed to load directory contents:", error);
@@ -122,8 +134,8 @@
         }
     }
 
-    function handleNoteClick(noteId: string) {
-        loadNote(noteId);
+    function handleFileClick(fileId: string, fileType: string, filePath?: string) {
+        openFile({ id: fileId, fileType, filePath });
     }
 
     function handleDirSelect(e: MouseEvent) {
@@ -156,6 +168,22 @@
             y: e.clientY,
             type: "note",
             noteId,
+        };
+    }
+
+    function handleCanvasContextMenu(
+        e: MouseEvent,
+        cf: CanvasFileItem,
+    ) {
+        e.preventDefault();
+        e.stopPropagation();
+        contextMenu = {
+            x: e.clientX,
+            y: e.clientY,
+            type: "canvas",
+            canvasFileId: cf.fileId,
+            canvasFilePath: cf.filePath,
+            canvasFileTitle: cf.title,
         };
     }
 
@@ -229,6 +257,21 @@
                     },
                 },
                 {
+                    label: "New Canvas Here",
+                    icon: "🎨",
+                    action: async () => {
+                        try {
+                            await canvasInvoke('create_canvas_file_cmd', {
+                                title: "Untitled Canvas",
+                                directory: contextMenu?.dirPath ?? path
+                            });
+                            // list refreshes via tree-changed wrapper
+                        } catch (e) {
+                            console.error('Failed to create canvas:', e);
+                        }
+                    }
+                },
+                {
                     label: "New Folder Here",
                     icon: "📁",
                     action: () => {
@@ -266,6 +309,52 @@
             ];
         }
 
+        if (contextMenu.type === "canvas") {
+            return [
+                {
+                    label: "Rename",
+                    icon: "✏️",
+                    action: () => {
+                        if (contextMenu?.canvasFileId && contextMenu.canvasFilePath) {
+                            // Show just the stem (no extension) as the editable value
+                            const fullName = contextMenu.canvasFilePath.split(/[\\/]/).pop() ?? "";
+                            const stem = fullName.replace(/\.[^.]+$/, "");
+                            renamingItem = {
+                                type: "canvas",
+                                id: contextMenu.canvasFileId,
+                                value: stem,
+                                filePath: contextMenu.canvasFilePath,
+                            };
+                            requestAnimationFrame(() => {
+                                renameInputRef?.focus();
+                                renameInputRef?.select();
+                            });
+                        }
+                    },
+                },
+                {
+                    label: "Delete",
+                    icon: "🗑",
+                    action: async () => {
+                        if (contextMenu?.canvasFileId && contextMenu.canvasFilePath) {
+                            try {
+                                await canvasInvoke('delete_canvas_file_cmd', {
+                                    fileId: contextMenu.canvasFileId,
+                                    path: contextMenu.canvasFilePath,
+                                });
+                                setTimeout(() => refreshTree(), 200);
+                                addToast("success", "Canvas deleted");
+                            } catch (e) {
+                                console.error("Failed to delete canvas:", e);
+                                addToast("error", "Failed to delete canvas");
+                            }
+                        }
+                    },
+                    danger: true,
+                },
+            ];
+        }
+
         // Empty area
         return [
             {
@@ -273,6 +362,21 @@
                 icon: "📄",
                 action: () => {
                     createAndOpenNote("Untitled Note", path);
+                },
+            },
+            {
+                label: "New Canvas",
+                icon: "🎨",
+                action: async () => {
+                    try {
+                        await canvasInvoke("create_canvas_file_cmd", {
+                            title: "Untitled Canvas",
+                            directory: path ?? "",
+                        });
+                    } catch (e) {
+                        console.error("Failed to create canvas:", e);
+                        addToast("error", "Failed to create canvas");
+                    }
                 },
             },
             {
@@ -356,19 +460,28 @@
         }
 
         try {
-            let result;
-            if (type === "note") {
-                result = await renameNoteById(id, trimmed);
-            } else {
-                result = await renameDirectoryByPath(id, trimmed);
-            }
-
-            if (result.success) {
-                // Delay refresh to let watcher process rename
+            if (type === "canvas") {
+                await canvasInvoke('rename_canvas_file_cmd', {
+                    fileId: id,
+                    oldPath: renamingItem.filePath,
+                    newName: trimmed,
+                });
                 setTimeout(() => refreshTree(), 400);
                 addToast("success", `Renamed to "${trimmed}"`);
             } else {
-                addToast("error", result.message || "Rename failed");
+                let result;
+                if (type === "note") {
+                    result = await renameNoteById(id, trimmed);
+                } else {
+                    result = await renameDirectoryByPath(id, trimmed);
+                }
+
+                if (result.success) {
+                    setTimeout(() => refreshTree(), 400);
+                    addToast("success", `Renamed to "${trimmed}"`);
+                } else {
+                    addToast("error", result.message || "Rename failed");
+                }
             }
         } catch (error) {
             console.error("Rename failed:", error);
@@ -523,7 +636,7 @@
                     <button
                         class="note-row"
                         class:note-active={$activeNoteId === note.noteId}
-                        onclick={() => handleNoteClick(note.noteId)}
+                        onclick={() => handleFileClick(note.noteId, "jnote")}
                         oncontextmenu={(e) =>
                             handleNoteContextMenu(
                                 e,
@@ -554,8 +667,35 @@
                     </button>
                 {/each}
 
+                <!-- Canvas Files -->
+                {#each canvasFiles as cf (cf.fileId)}
+                    <button
+                        class="note-row"
+                        onclick={() => handleFileClick(cf.fileId, cf.fileType, cf.filePath)}
+                        oncontextmenu={(e) => handleCanvasContextMenu(e, cf)}
+                    >
+                        {#if cf.fileType === "jcanvas"}
+                            <PenLine size={14} class="flex-shrink-0 text-orange-500/70" />
+                        {:else}
+                            <BookOpen size={14} class="flex-shrink-0 text-indigo-500/70" />
+                        {/if}
+                        {#if renamingItem?.type === "canvas" && renamingItem?.id === cf.fileId}
+                            <input
+                                bind:this={renameInputRef}
+                                class="rename-input"
+                                type="text"
+                                bind:value={renamingItem.value}
+                                onkeydown={handleRenameKeydown}
+                                onblur={commitRename}
+                            />
+                        {:else}
+                            <span class="truncate">{cf.title}</span>
+                        {/if}
+                    </button>
+                {/each}
+
                 <!-- Empty state -->
-                {#if isLoaded && subdirs.length === 0 && notes.length === 0}
+                {#if isLoaded && subdirs.length === 0 && notes.length === 0 && canvasFiles.length === 0}
                     <div class="text-xs text-neutral-600 px-2 py-1 italic">
                         Empty folder
                     </div>

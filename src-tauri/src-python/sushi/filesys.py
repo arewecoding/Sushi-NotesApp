@@ -5,15 +5,70 @@ File I/O helpers, filename utilities, and CRUD operations for notes and director
 """
 
 import json
+import os
 import re
 import shutil
+import tempfile
 import time
 from typing import Optional
 from pathlib import Path
 
+import structlog
+
 from sushi.cache_db import FileIndex
 from sushi.note_schema import JNote
 from sushi.logger import sys_log, LogSource, LogLevel
+
+log = structlog.get_logger(__name__)
+
+
+# ==========================================
+# Atomic Write & Performance Utilities
+# ==========================================
+
+
+def atomic_write(path: Path, content: str) -> None:
+    """Write content to path atomically. Original is untouched if write fails."""
+    dir_path = Path(path).parent
+    dir_path.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def save_data_url_as_png(data_url: str, path: Path) -> None:
+    """Decode a base64 PNG data URL and write the raw bytes to path.
+
+    Args:
+        data_url: A string of the form ``data:image/png;base64,<encoded>``.
+        path: Destination file path. Parent directory must already exist.
+    """
+    import base64
+
+    _, encoded = data_url.split(",", 1)
+    png_bytes = base64.b64decode(encoded)
+    path.write_bytes(png_bytes)
+
+
+def timed(operation_name: str):
+    """Decorator that logs elapsed time for a function via structlog."""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            result = fn(*args, **kwargs)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            log.debug("perf", operation=operation_name, elapsed_ms=round(elapsed_ms, 2))
+            return result
+        return wrapper
+    return decorator
 
 
 # ==========================================
@@ -21,6 +76,7 @@ from sushi.logger import sys_log, LogSource, LogLevel
 # ==========================================
 
 
+@timed("load_jnote")
 def load_jnote(file_path: Path) -> Optional[JNote]:
     """Reads a full JNote object from a .jnote file."""
     try:
@@ -36,11 +92,11 @@ def load_jnote(file_path: Path) -> Optional[JNote]:
         return None
 
 
+@timed("save_jnote")
 def save_jnote(file_path: Path, note: JNote) -> None:
-    """Writes a JNote object to disk without updating timestamps."""
+    """Writes a JNote object to disk atomically without updating timestamps."""
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(note.to_dict(), f, indent=2)
+        atomic_write(file_path, json.dumps(note.to_dict(), indent=2))
     except Exception as e:
         sys_log.log(
             LogSource.SYSTEM,
@@ -148,8 +204,7 @@ def create_new_note(base_dir: str, title: str = "Untitled Note") -> Optional[JNo
 
         note.metadata.last_known_path = str(file_path.resolve())
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(note.to_dict(), f, indent=2)
+        atomic_write(file_path, json.dumps(note.to_dict(), indent=2))
 
         sys_log.log(
             LogSource.SYSTEM, LogLevel.INFO, f"Created note on disk: {file_path}"
@@ -201,8 +256,7 @@ def update_note(db: FileIndex, note: JNote) -> Optional[float]:
 
             # Save content with last_known_path pointing to CURRENT path
             note.metadata.last_known_path = str(actual_path.resolve())
-            with open(actual_path, "w", encoding="utf-8") as f:
-                json.dump(note.to_dict(), f, indent=2)
+            atomic_write(actual_path, json.dumps(note.to_dict(), indent=2))
 
             # Rename with retry (watchdog may briefly hold the file)
             renamed = False
@@ -235,8 +289,7 @@ def update_note(db: FileIndex, note: JNote) -> Optional[float]:
             # No drift — save in place
             file_path = actual_path
             note.metadata.last_known_path = str(file_path.resolve())
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(note.to_dict(), f, indent=2)
+            atomic_write(file_path, json.dumps(note.to_dict(), indent=2))
 
         new_mtime = file_path.stat().st_mtime
         sys_log.log(

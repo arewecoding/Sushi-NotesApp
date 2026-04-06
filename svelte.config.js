@@ -14,6 +14,9 @@ const config = {
       pages: "dist",
       fallback: "index.html",
     }),
+    alias: {
+      '$canvas-engine': './Canvas/canvas-engine/pkg'
+    }
   },
 };
 

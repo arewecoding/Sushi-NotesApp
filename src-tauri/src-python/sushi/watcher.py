@@ -7,6 +7,7 @@ Updates the CacheDB and notifies the VaultService of events.
 
 import ijson
 import os
+import structlog
 import time
 import uuid
 from typing import Union, Callable, Optional
@@ -14,7 +15,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from sushi.cache_db import FileIndex, NoteMetadata, DirectoryMetadata
+from sushi.cache_db import FileIndex, NoteMetadata, DirectoryMetadata, CanvasFileMetadata
 from sushi.filesys import (
     load_jnote,
     save_jnote,
@@ -22,6 +23,11 @@ from sushi.filesys import (
     generate_filename,
 )
 from sushi.logger import sys_log, LogSource, LogLevel
+
+log = structlog.get_logger(__name__)
+
+# Canvas file extensions tracked by the indexer
+CANVAS_EXTENSIONS = {".jcanvas", ".jbook"}
 
 
 # ==========================================
@@ -172,6 +178,8 @@ class VaultEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         """Updates DB and notifies ActiveState on file creation events."""
         path = Path(event.src_path)
+        if ".sushi-resources" in path.parts:
+            return
         sys_log.log(LogSource.SYSTEM, LogLevel.DEBUG, f"Created: {path}")
 
         if event.is_directory:
@@ -182,10 +190,17 @@ class VaultEventHandler(FileSystemEventHandler):
             self._notify_active_state(path)
         elif path.suffix == ".jnote":
             self._process_note_file(path)
+        elif path.suffix in CANVAS_EXTENSIONS:
+            meta = VaultWatcher.extract_canvas_metadata(path)
+            if meta:
+                self.db.add_canvas_file(meta)
+            self._notify_active_state(path)
 
     def on_deleted(self, event):
         """Updates DB and notifies ActiveState on file deletion events."""
         path = Path(event.src_path)
+        if ".sushi-resources" in path.parts:
+            return
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Deleted event: {path}")
 
         # On Windows, event.is_directory may be False for deleted directories
@@ -245,14 +260,23 @@ class VaultEventHandler(FileSystemEventHandler):
                 )
 
             self._notify_active_state(path, mtime=0.0)
+        elif path.suffix in CANVAS_EXTENSIONS:
+            self.db.delete_canvas_file_by_path(str(path.resolve()))
+            self._notify_active_state(path, mtime=0.0)
 
     def on_modified(self, event):
         """Updates DB and notifies ActiveState on file modification events."""
         if event.is_directory:
             return
         path = Path(event.src_path)
+        if ".sushi-resources" in path.parts:
+            return
         if path.suffix == ".jnote":
             self._process_note_file(path)
+        elif path.suffix in CANVAS_EXTENSIONS:
+            meta = VaultWatcher.extract_canvas_metadata(path)
+            if meta:
+                self.db.add_canvas_file(meta)
 
     def on_moved(self, event):
         """
@@ -261,6 +285,8 @@ class VaultEventHandler(FileSystemEventHandler):
         """
         old_path = Path(event.src_path)
         new_path = Path(event.dest_path)
+        if ".sushi-resources" in old_path.parts or ".sushi-resources" in new_path.parts:
+            return
         sys_log.log(
             LogSource.SYSTEM, LogLevel.DEBUG, f"Moved: {old_path} -> {new_path}"
         )
@@ -288,6 +314,15 @@ class VaultEventHandler(FileSystemEventHandler):
 
             self._process_note_file(new_path)
             # Signal a structural move (mtime=-1) so tree updates
+            self._notify_active_state(new_path, mtime=-1.0)
+        elif new_path.suffix in CANVAS_EXTENSIONS:
+            self.db.update_canvas_file_path(
+                str(old_path.resolve()), str(new_path.resolve())
+            )
+            # Re-extract metadata in case title changed
+            meta = VaultWatcher.extract_canvas_metadata(new_path)
+            if meta:
+                self.db.add_canvas_file(meta)
             self._notify_active_state(new_path, mtime=-1.0)
 
 
@@ -348,13 +383,20 @@ class VaultWatcher:
                 )
                 db.add_directory(dir_meta)
 
-            # Register notes
+            # Register notes and canvas files
             for file in files:
+                file_path = root_path / file
                 if file.endswith(".jnote"):
-                    file_path = root_path / file
                     meta = self.extract_note_metadata(file_path)
                     if meta:
                         db.add_metadata(meta)
+                elif file.endswith((".jcanvas", ".jbook")):
+                    try:
+                        canvas_meta = self.extract_canvas_metadata(file_path)
+                        if canvas_meta:
+                            db.add_canvas_file(canvas_meta)
+                    except Exception as e:
+                        log.warning("canvas_index_failed", path=str(file_path), error=str(e))
 
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "Initial scan complete.")
 
@@ -375,4 +417,26 @@ class VaultWatcher:
             sys_log.log(
                 LogSource.SYSTEM, LogLevel.ERROR, f"Failed to parse {file_path}: {e}"
             )
+        return None
+
+    @staticmethod
+    def extract_canvas_metadata(file_path: Path) -> Optional[CanvasFileMetadata]:
+        """Efficiently reads just the 'metadata' key from a .jcanvas/.jbook file using ijson."""
+        try:
+            with open(file_path, "rb") as f:
+                parser = ijson.items(f, "metadata", use_float=True)
+                for metadata in parser:
+                    file_type = file_path.suffix.lstrip(".")  # 'jcanvas' or 'jbook'
+                    return CanvasFileMetadata(
+                        file_id=metadata.get("file_id", file_path.stem),
+                        title=metadata.get("title", file_path.stem),
+                        path=str(file_path.resolve()),
+                        file_type=file_type,
+                        file_dir=str(file_path.parent.resolve()),
+                        created_at=metadata.get("created_at"),
+                        last_modified=metadata.get("last_modified"),
+                        last_known_path=str(file_path.resolve()),
+                    )
+        except Exception as e:
+            log.warning("canvas_metadata_parse_failed", path=str(file_path), error=str(e))
         return None

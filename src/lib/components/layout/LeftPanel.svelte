@@ -20,6 +20,7 @@
     createDirectoryIn,
   } from "$lib/client/apiClient";
   import { addToast } from "$lib/stores/toastStore";
+  import { canvasInvoke } from "$lib/client/canvasApi";
   import {
     dragItem,
     dragPosition,
@@ -65,6 +66,19 @@
 
   function handleNewNote() {
     createAndOpenNote("Untitled Note", $selectedDirPath);
+  }
+
+  async function handleNewCanvas() {
+    const dir = $selectedDirPath ?? "";
+    try {
+      await canvasInvoke("create_canvas_file_cmd", {
+        title: "Untitled Canvas",
+        directory: dir,
+      });
+    } catch (error) {
+      console.error("Failed to create canvas:", error);
+      addToast("error", "Failed to create canvas");
+    }
   }
 
   async function handleNewFolder() {
@@ -213,6 +227,11 @@
         label: "New Note",
         icon: "📄",
         action: () => handleNewNote(),
+      },
+      {
+        label: "New Canvas",
+        icon: "🎨",
+        action: () => handleNewCanvas(),
       },
       {
         label: "New Folder",

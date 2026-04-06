@@ -1,9 +1,12 @@
 import os
 import sqlite3
+import structlog
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Union
 from sushi.logger import sys_log, LogSource, LogLevel
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -19,6 +22,8 @@ class NoteMetadata:
             self.note_dir = Path(self.note_dir)
 
 
+
+
 @dataclass
 class DirectoryMetadata:
     dir_path: Path
@@ -30,6 +35,19 @@ class DirectoryMetadata:
             self.dir_path = Path(self.dir_path)
         if self.parent_path and not isinstance(self.parent_path, Path):
             self.parent_path = Path(self.parent_path)
+
+
+@dataclass
+class CanvasFileMetadata:
+    """Metadata for a .jcanvas or .jbook file in the vault."""
+    file_id: str
+    title: str
+    path: str              # absolute path to the file
+    file_type: str         # 'jcanvas' or 'jbook'
+    file_dir: str          # parent directory (for directory-scoped queries)
+    created_at: Optional[str] = None
+    last_modified: Optional[str] = None
+    last_known_path: Optional[str] = None
 
 
 class FileIndex:
@@ -65,6 +83,22 @@ class FileIndex:
             )
         """)
 
+        # Table for canvas files (.jcanvas, .jbook)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS canvas_files (
+                file_id         TEXT PRIMARY KEY,
+                title           TEXT NOT NULL,
+                path            TEXT NOT NULL,
+                file_type       TEXT NOT NULL CHECK(file_type IN ('jcanvas', 'jbook')),
+                file_dir        TEXT NOT NULL,
+                created_at      TEXT,
+                last_modified   TEXT,
+                last_known_path TEXT
+            )
+        """)
+
+
+
         self.conn.commit()
         sys_log.log(LogSource.DB, LogLevel.DEBUG, "Database tables ready")
 
@@ -73,6 +107,8 @@ class FileIndex:
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM notes")
         cursor.execute("DELETE FROM directories")
+        cursor.execute("DELETE FROM canvas_files")
+
         self.conn.commit()
         sys_log.log(LogSource.DB, LogLevel.INFO, "Database cleared for fresh scan")
 
@@ -90,10 +126,14 @@ class FileIndex:
         notes = cursor.execute(
             "SELECT * FROM notes WHERE note_dir = ?", (target_path,)
         ).fetchall()
+        canvas_files = cursor.execute(
+            "SELECT * FROM canvas_files WHERE file_dir = ?", (target_path,)
+        ).fetchall()
 
         return {
             "subdirs": [dict(d) for d in subdirs],
             "notes": [dict(n) for n in notes],
+            "canvas_files": [dict(c) for c in canvas_files],
         }
 
     def get_metadata(self, note_id: str) -> Optional[NoteMetadata]:
@@ -228,6 +268,10 @@ class FileIndex:
             "DELETE FROM directories WHERE dir_path = ? OR dir_path LIKE ?",
             (dir_path, wildcard_path),
         )
+        cursor.execute(
+            "DELETE FROM canvas_files WHERE file_dir = ? OR file_dir LIKE ?",
+            (dir_path, wildcard_path),
+        )
         self.conn.commit()
 
         sys_log.log(
@@ -271,9 +315,91 @@ class FileIndex:
             (old_path, new_path, old_path, wildcard_old),
         )
 
+        # 4. Update all canvas files inside
+        cursor.execute(
+            "UPDATE canvas_files SET file_dir = REPLACE(file_dir, ?, ?), path = REPLACE(path, ?, ?) WHERE file_dir = ? OR file_dir LIKE ?",
+            (old_path, new_path, old_path, new_path, old_path, wildcard_old),
+        )
+
         self.conn.commit()
         sys_log.log(
             LogSource.DB,
             LogLevel.INFO,
             f"Renamed directory from {old_path} to {new_path}",
         )
+
+    # =====================
+    # Canvas File CRUD
+    # =====================
+
+    def add_canvas_file(self, meta: CanvasFileMetadata):
+        """Insert or update a canvas file record."""
+        cursor = self.conn.cursor()
+        file_dir_str = str(Path(meta.file_dir).resolve())
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canvas_files
+                (file_id, title, path, file_type, file_dir, created_at, last_modified, last_known_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                meta.file_id,
+                meta.title,
+                meta.path,
+                meta.file_type,
+                file_dir_str,
+                meta.created_at,
+                meta.last_modified,
+                meta.last_known_path,
+            ),
+        )
+        self.conn.commit()
+        log.debug("canvas_file_registered", file_id=meta.file_id, title=meta.title)
+
+    def delete_canvas_file(self, file_id: str):
+        """Remove a canvas file by its file_id."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM canvas_files WHERE file_id = ?", (file_id,))
+        self.conn.commit()
+        log.info("canvas_file_deleted", file_id=file_id)
+
+    def delete_canvas_file_by_path(self, path: str):
+        """Remove a canvas file by its absolute path."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM canvas_files WHERE path = ?", (path,))
+        self.conn.commit()
+        log.info("canvas_file_deleted_by_path", path=path)
+
+    def get_canvas_file(self, file_id: str) -> Optional[CanvasFileMetadata]:
+        """Look up a canvas file by ID."""
+        cursor = self.conn.cursor()
+        row = cursor.execute(
+            "SELECT * FROM canvas_files WHERE file_id = ?", (file_id,)
+        ).fetchone()
+        if row:
+            return CanvasFileMetadata(**dict(row))
+        return None
+
+    def get_canvas_file_by_path(self, path: str) -> Optional[CanvasFileMetadata]:
+        """Look up a canvas file by its absolute path."""
+        cursor = self.conn.cursor()
+        row = cursor.execute(
+            "SELECT * FROM canvas_files WHERE path = ?", (path,)
+        ).fetchone()
+        if row:
+            return CanvasFileMetadata(**dict(row))
+        return None
+
+    def update_canvas_file_path(self, old_path: str, new_path: str):
+        """Update the path of a canvas file after a move."""
+        cursor = self.conn.cursor()
+        new_dir = str(Path(new_path).parent.resolve())
+        cursor.execute(
+            "UPDATE canvas_files SET path = ?, file_dir = ?, last_known_path = ? WHERE path = ?",
+            (new_path, new_dir, new_path, old_path),
+        )
+        self.conn.commit()
+        log.info("canvas_file_path_updated", old_path=old_path, new_path=new_path)
+
+    # =====================
+

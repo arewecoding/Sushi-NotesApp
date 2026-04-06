@@ -31,7 +31,35 @@ export const isSavingNote = writable(false);
 
 // Debounce timer for auto-save
 let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingSaveNoteId: string | null = null;
+let pendingSaveTitle: string = '';
+let pendingSaveBlocks: NoteBlock[] = [];
 const SAVE_DEBOUNCE_MS = 1500; // 1.5 seconds
+
+/**
+ * Immediately flush any pending debounced save.
+ * Must be called BEFORE switching activeNoteId to prevent cross-note contamination.
+ */
+export async function flushPendingSave(): Promise<void> {
+    if (saveDebounceTimer && pendingSaveNoteId) {
+        clearTimeout(saveDebounceTimer);
+        saveDebounceTimer = null;
+        const noteId = pendingSaveNoteId;
+        const title = pendingSaveTitle;
+        const blocks = [...pendingSaveBlocks];
+        pendingSaveNoteId = null;
+        try {
+            const result = await updateNoteContent(noteId, title, blocks);
+            if (!result.success) {
+                console.error('Flush save failed:', result.message);
+            }
+        } catch (error) {
+            console.error('Flush save error:', error);
+        } finally {
+            isSavingNote.set(false);
+        }
+    }
+}
 
 // Derived store for the currently selected note's metadata
 export const activeNoteMetadata = derived(
@@ -62,6 +90,9 @@ export async function fetchNotes(): Promise<void> {
  * Open a note and load its content.
  */
 export async function loadNote(noteId: string): Promise<void> {
+    // CRITICAL: flush any pending save for the PREVIOUS note before switching
+    await flushPendingSave();
+
     isLoadingNote.set(true);
     activeNoteId.set(noteId);
 
@@ -86,13 +117,12 @@ export async function loadNote(noteId: string): Promise<void> {
  * Save the current note content to the backend (debounced).
  * Call this whenever the user edits the title or blocks.
  */
-export function saveNoteContentDebounced(title: string, blocks: NoteBlock[]): void {
-    const noteId = get(activeNoteId);
+export function saveNoteContentDebounced(noteId: string, title: string, blocks: NoteBlock[]): void {
     if (!noteId) return;
 
     // Update the local store immediately for responsive UI
     activeNoteContent.update(content => {
-        if (content) {
+        if (content && content.noteId === noteId) {
             return { ...content, title, blocks };
         }
         return content;
@@ -103,9 +133,19 @@ export function saveNoteContentDebounced(title: string, blocks: NoteBlock[]): vo
         clearTimeout(saveDebounceTimer);
     }
 
+    // Stash the pending save details so flushPendingSave can fire them
+    pendingSaveNoteId = noteId;
+    pendingSaveTitle = title;
+    pendingSaveBlocks = [...blocks]; // snapshot
+
     isSavingNote.set(true);
 
     saveDebounceTimer = setTimeout(async () => {
+        saveDebounceTimer = null;
+        // We no longer randomly drop the save if note switched. 
+        // Background saves for inactive notes are perfectly safe.
+        // Proceed with the save using the explicitly passed noteId.
+        pendingSaveNoteId = null;
         try {
             const result = await updateNoteContent(noteId, title, blocks);
             if (result.success) {

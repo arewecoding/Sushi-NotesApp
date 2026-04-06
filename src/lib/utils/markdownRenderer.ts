@@ -59,6 +59,9 @@ function linkToHtml(
  * cross-line markdown behaviour (e.g. blockquotes bleeding into next line).
  * Each line becomes a <div class="md-line"> with rendered HTML and a
  * data-raw attribute preserving the original markdown.
+ *
+ * Also supports fenced code blocks (``` ... ```) — lines between fences
+ * are collected and rendered as a <pre><code> block.
  */
 export function renderViewHtml(
     rawText: string,
@@ -66,14 +69,71 @@ export function renderViewHtml(
 ): string {
     if (!rawText.trim()) return "";
 
-    return rawText
-        .split("\n")
-        .map((line) => {
+    const lines = rawText.split("\n");
+    const parts: string[] = [];
+    let inCodeFence = false;
+    let codeFenceLines: string[] = [];
+    let codeFenceLang = "";
+
+    for (const line of lines) {
+        const fenceMatch = line.match(/^```(\w*)\s*$/);
+
+        if (fenceMatch && !inCodeFence) {
+            // Opening fence
+            inCodeFence = true;
+            codeFenceLang = fenceMatch[1] || "";
+            codeFenceLines = [];
+        } else if (/^```\s*$/.test(line) && inCodeFence) {
+            // Closing fence — emit the code block
+            const codeContent = escapeHtml(codeFenceLines.join("\n"));
+            const langAttr = codeFenceLang ? ` data-lang="${escapeHtml(codeFenceLang)}"` : "";
+            const langLabel = codeFenceLang
+                ? `<span class="md-code-fence-lang">${escapeHtml(codeFenceLang)}</span>`
+                : "";
+            parts.push(
+                `<div class="md-code-fence"${langAttr}>${langLabel}<pre><code>${codeContent}</code></pre></div>`
+            );
+            inCodeFence = false;
+            codeFenceLines = [];
+            codeFenceLang = "";
+        } else if (inCodeFence) {
+            // Inside a fence — collect raw lines
+            codeFenceLines.push(line);
+        } else {
+            // Normal line — check for indentation
             const html = renderLineHtml(line, notesList);
             const enc = encodeURIComponent(line);
-            return `<div class="md-line" data-raw="${enc}">${html}</div>`;
-        })
-        .join("");
+
+            // Count leading spaces for indent guides
+            const leadingMatch = line.match(/^( +)/);
+            if (leadingMatch) {
+                const spaces = leadingMatch[1].length;
+                const levels = Math.floor(spaces / 4);
+                if (levels > 0) {
+                    // Build indent guide markers
+                    let guides = "";
+                    for (let g = 1; g <= levels; g++) {
+                        const px = g * 4 * 7.8; // ~7.8px per ch in monospace
+                        guides += `<span class="md-indent-guide" style="left:${px}px"></span>`;
+                    }
+                    parts.push(`<div class="md-line md-indented" data-raw="${enc}" style="--indent-px:${spaces * 7.8}px">${guides}${html}</div>`);
+                    continue;
+                }
+            }
+
+            parts.push(`<div class="md-line" data-raw="${enc}">${html}</div>`);
+        }
+    }
+
+    // If we ended inside an unclosed fence, render collected lines as code anyway
+    if (inCodeFence && codeFenceLines.length > 0) {
+        const codeContent = escapeHtml(codeFenceLines.join("\n"));
+        parts.push(
+            `<div class="md-code-fence"><pre><code>${codeContent}</code></pre></div>`
+        );
+    }
+
+    return parts.join("");
 }
 
 // ── Edit-mode: per-line renderer (Obsidian approach) ────────────────────────

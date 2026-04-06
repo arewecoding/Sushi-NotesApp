@@ -42,13 +42,16 @@
     import GhostBlock from "$lib/components/editor/GhostBlock.svelte";
     import RichTextBlock from "$lib/components/editor/RichTextBlock.svelte";
     import LaTeXBlock from "$lib/components/editor/LaTeXBlock.svelte";
+    import CodeBlock from "$lib/components/editor/CodeBlock.svelte";
+    import LinkModal from "$lib/components/linking/LinkModal.svelte";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+    import { openLinkModal } from "$lib/stores/linkModalStore";
     import {
         FOCUS_BLUR_DELAY_MS,
         NAVIGATE_SCROLL_DELAY_MS,
         latexSnippets,
     } from "$lib/editor/editorConstants";
-    import { createBlock } from "$lib/editor/blockFactory";
+    import { createBlockCmd } from "$lib/client/apiClient";
     import {
         dragBlockIndex,
         dropTargetIndex,
@@ -57,6 +60,10 @@
         updateDropTarget,
         endBlockDrag,
     } from "$lib/stores/blockDragStore";
+    import { currentView } from "$lib/stores/viewStore";
+    import InfiniteCanvas from "$lib/components/canvas/InfiniteCanvas.svelte";
+    import NotebookCanvasPlaceholder from "$lib/components/canvas/NotebookCanvasPlaceholder.svelte";
+    import CanvasBlock from "$lib/components/editor/CanvasBlock.svelte";
 
     // Track which note and version we've initialized for
     let initializedNoteId: string | null = null;
@@ -65,8 +72,9 @@
     // ── Non-reactive block contents ────────────────────────────────────────
     // This is PLAIN JS - not $state() - so mutations don't trigger re-renders
     let blockContents: Record<string, string> = {};
+    let blockLanguages: Record<string, string> = {};
     let currentTitle: string = "";
-    let currentBlocks: NoteBlock[] = [];
+    let currentBlocks: NoteBlock[] = $state([]);
 
     // Reactive flag to show blocks (but content is managed non-reactively)
     let showBlocks = $state(false);
@@ -86,6 +94,9 @@
         {
             applyFormat?: (t: string) => void;
             insertSnippet?: (t: string) => void;
+            insertLinkSyntax?: (s: string) => void;
+            replaceSelectionWithLink?: (s: string) => void;
+            getSelectedText?: () => string;
         } | null
     > = {};
 
@@ -118,6 +129,46 @@
         ref?.insertSnippet?.(snippet);
     }
 
+    /**
+     * Called by RichTextBlock when user types `[[`.
+     * Opens the link modal with a callback to insert at cursor.
+     */
+    function handleLinkStart(blockId: string) {
+        const ref = blockRefs[blockId];
+        openLinkModal({
+            displayText: "",
+            blockId,
+            insertionCallback: (syntax: string) => {
+                ref?.insertLinkSyntax?.(syntax);
+            },
+        });
+    }
+
+    /**
+     * Toolbar Link button — opens the link modal with the
+     * current selection text, if any.
+     */
+    function handleToolbarLink() {
+        if (!focusedBlock) return;
+        const ref = blockRefs[focusedBlock.id];
+        const selectedText = ref?.getSelectedText?.() ?? "";
+        const blockId = focusedBlock.id;
+
+        openLinkModal({
+            displayText: selectedText,
+            blockId,
+            insertionCallback: (syntax: string) => {
+                if (selectedText) {
+                    // Replace selection with pill syntax (Issue 4)
+                    ref?.replaceSelectionWithLink?.(syntax);
+                } else {
+                    // Insert at cursor
+                    ref?.insertLinkSyntax?.(syntax);
+                }
+            },
+        });
+    }
+
     // Watch for note changes and initialize ONCE per note
     // Also handles external updates via noteContentVersion
     $effect(() => {
@@ -147,11 +198,16 @@
                 currentTitle = content.title;
                 currentBlocks = content.blocks;
 
-                // Build content map for blocks
+                // Build content and language maps for blocks
                 blockContents = {};
+                blockLanguages = {};
                 for (const block of content.blocks) {
                     blockContents[block.blockId] =
                         block.data?.content || block.data?.code || "";
+                    if (block.type === "code") {
+                        blockLanguages[block.blockId] =
+                            (block.data?.language as string) || "plaintext";
+                    }
                 }
 
                 // Trigger re-render to show the new blocks
@@ -183,13 +239,56 @@
 
     function handleBlockInput(blockId: string, e: Event) {
         const target = e.target as HTMLElement;
-        blockContents[blockId] = target.textContent || "";
+        blockContents[blockId] = target.innerText || "";
         triggerSave();
     }
 
     /** Called by LinkedBlock's onchange — receives plain text with [[links]] preserved. */
     function handleLinkedBlockChange(blockId: string, text: string) {
         blockContents[blockId] = text;
+        triggerSave();
+    }
+
+    /** Called by CodeBlock on content change. */
+    function handleCodeBlockChange(blockId: string, code: string) {
+        blockContents[blockId] = code;
+        triggerSave();
+    }
+
+    /** Called by CodeBlock when the user changes the language. */
+    function handleCodeLanguageChange(blockId: string, lang: string) {
+        blockLanguages[blockId] = lang;
+        // Also update the block's data directly so triggerSave picks it up
+        const block = currentBlocks.find((b) => b.blockId === blockId);
+        if (block) {
+            block.data = { ...block.data, language: lang };
+        }
+        triggerSave();
+    }
+
+    /** Called by CodeBlock when user presses Escape to exit the block. */
+    function handleCodeBlockEscape(blockId: string) {
+        // Move focus to the block wrapper so keyboard navigation works
+        const wrapper = document.querySelector(
+            `[data-block-id="${blockId}"]`,
+        )?.closest(".block-wrapper");
+        if (wrapper instanceof HTMLElement) {
+            wrapper.focus();
+        }
+    }
+
+    /**
+     * Called by CanvasBlock on blur/save — updates block data and triggers note save.
+     * The data arg carries { canvas_ref, thumbnail_ref, size } from the block.
+     */
+    function handleCanvasBlockChange(blockId: string, newData: object) {
+        // SAFETY: ignore stale change callbacks from a previous note's CanvasBlock
+        if ($activeNoteId !== initializedNoteId) return;
+
+        const block = currentBlocks.find((b) => b.blockId === blockId);
+        if (block) {
+            block.data = { ...block.data, ...newData };
+        }
         triggerSave();
     }
 
@@ -208,6 +307,8 @@
     }
 
     function triggerSave() {
+        if (!initializedNoteId) return;
+        
         // Build blocks array from our non-reactive storage
         const blocksToSave = currentBlocks.map((block) => ({
             ...block,
@@ -218,9 +319,12 @@
                     block.type === "code"
                         ? blockContents[block.blockId]
                         : block.data?.code,
+                ...(block.type === "code"
+                    ? { language: blockLanguages[block.blockId] || "plaintext" }
+                    : {}),
             },
         }));
-        saveNoteContentDebounced(currentTitle, blocksToSave);
+        saveNoteContentDebounced(initializedNoteId, currentTitle, blocksToSave);
     }
 
     // ========== Block Operations ==========
@@ -233,8 +337,12 @@
         });
     }
 
-    function insertBlockAt(index: number, type: string = "text") {
-        const newBlock = createBlock(type);
+    async function insertBlockAt(index: number, type: string = "text") {
+        if (!$activeNoteId) return;
+        
+        const newBlock = await createBlockCmd($activeNoteId, type);
+        if (!newBlock) return;
+
         currentBlocks = [
             ...currentBlocks.slice(0, index),
             newBlock,
@@ -242,8 +350,7 @@
         ];
         blockContents[newBlock.blockId] = "";
 
-        // Re-render and save
-        rerenderBlocks();
+        // Let the keyed {#each} handle the surgical DOM insert — no rerenderBlocks()
         queueMicrotask(() => {
             // Focus the new block after render
             queueMicrotask(() => {
@@ -281,8 +388,7 @@
         pendingDeleteBlockId = null;
         hoveredBlockId = null;
 
-        // Re-render and save
-        rerenderBlocks();
+        // Keyed {#each} handles DOM removal surgically — no rerenderBlocks()
         triggerSave();
     }
 
@@ -297,7 +403,6 @@
         [copy[idx], copy[targetIdx]] = [copy[targetIdx], copy[idx]];
         currentBlocks = copy;
 
-        rerenderBlocks();
         triggerSave();
     }
 
@@ -308,7 +413,6 @@
         copy.splice(toIndex, 0, moved);
         currentBlocks = copy;
 
-        rerenderBlocks();
         triggerSave();
     }
 
@@ -443,6 +547,20 @@
             >
                 <Minus size={14} />
             </button>
+            <div class="w-px h-4 bg-neutral-800 mx-1"></div>
+            <button
+                class="toolbar-fmt-btn"
+                title="Insert link ([[)"
+                onmousedown={(e) => {
+                    e.preventDefault();
+                    handleToolbarLink();
+                }}
+            >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+            </button>
         {:else if focusedBlock?.type === "latex"}
             <!-- ── LaTeX toolbar ── -->
             <span
@@ -498,14 +616,19 @@
     </div>
 
     <!-- Editor Content -->
-    <div
-        class="flex-grow overflow-y-auto p-12 max-w-4xl mx-auto w-full editor-content-area"
-    >
-        {#if $isLoadingNote}
+    {#if $currentView.type === "canvas"}
+        <div class="flex-grow flex flex-col overflow-hidden w-full h-full">
+            <InfiniteCanvas canvasId={$currentView.canvasId} filePath={$currentView.filePath} />
+        </div>
+    {:else}
+        <div class="flex-grow overflow-y-auto p-12 max-w-4xl mx-auto w-full editor-content-area">
+            {#if $currentView.type === "book"}
+                <NotebookCanvasPlaceholder bookId={$currentView.bookId} filePath={$currentView.filePath} />
+            {:else if $isLoadingNote}
             <div class="flex items-center justify-center h-64 text-neutral-500">
                 <Loader2 size={32} class="animate-spin" />
             </div>
-        {:else if !$activeNoteId}
+        {:else if !$activeNoteId || $currentView.type === "empty"}
             <!-- No note selected — branded home -->
             <div
                 class="flex flex-col items-center justify-center h-full text-neutral-500 gap-4"
@@ -625,18 +748,21 @@
                                         className="text-neutral-300 p-3"
                                         onchange={handleLinkedBlockChange}
                                         onnavigate={handleNavigate}
+                                        onlinkstart={handleLinkStart}
                                     />
                                 {:else if block.type === "code"}
-                                    <pre
-                                        class="editor-block bg-neutral-800/60 text-neutral-300 p-3 rounded-b text-sm overflow-x-auto outline-none"
-                                        contenteditable="true"
-                                        data-block-id={block.blockId}
-                                        use:initContent={block.blockId}
-                                        oninput={(e) =>
-                                            handleBlockInput(
-                                                block.blockId,
-                                                e,
-                                            )}></pre>
+                                    <CodeBlock
+                                        blockId={block.blockId}
+                                        initialCode={blockContents[
+                                            block.blockId
+                                        ] || ""}
+                                        initialLanguage={blockLanguages[
+                                            block.blockId
+                                        ] || "plaintext"}
+                                        onchange={handleCodeBlockChange}
+                                        onlanguagechange={handleCodeLanguageChange}
+                                        onescape={handleCodeBlockEscape}
+                                    />
                                 {:else if block.type === "todo"}
                                     <div class="flex items-start gap-2 p-3">
                                         <input
@@ -655,6 +781,7 @@
                                             className="text-neutral-300 flex-1"
                                             onchange={handleLinkedBlockChange}
                                             onnavigate={handleNavigate}
+                                            onlinkstart={handleLinkStart}
                                         />
                                     </div>
                                 {:else if block.type === "latex"}
@@ -666,6 +793,13 @@
                                         ] || ""}
                                         className="p-1"
                                         onchange={handleLinkedBlockChange}
+                                    />
+                                {:else if block.type === "canvas"}
+                                    <CanvasBlock
+                                        blockId={block.blockId}
+                                        noteId={initializedNoteId!}
+                                        initialData={block.data as any}
+                                        onchange={handleCanvasBlockChange}
                                     />
                                 {:else}
                                     <div
@@ -693,6 +827,7 @@
             <div class="text-neutral-500 text-center py-8">Loading note...</div>
         {/if}
     </div>
+{/if}
 </div>
 
 <!-- Delete confirmation dialog -->
@@ -712,6 +847,9 @@
         pendingDeleteBlockId = null;
     }}
 />
+
+<!-- Link modal -->
+<LinkModal />
 
 <style>
     /* Context-aware toolbar format buttons */
@@ -744,6 +882,7 @@
     .blocks-container {
         display: flex;
         flex-direction: column;
+        gap: 2px;
     }
 
     /* Prevent text selection while dragging blocks */

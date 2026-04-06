@@ -1,5 +1,8 @@
 [workspace]
-members = ["src-tauri"]
+members = [
+    "src-tauri",
+    "Canvas/canvas-engine",
+]
 resolver = "2"
 
 [workspace.package]

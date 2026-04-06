@@ -93,6 +93,16 @@ class SushiLogger:
         except Exception:
             sys.stderr.write(f"Failed to create log file at {log_dir}\n")
 
+        # Local unified debug trace (project root)
+        try:
+            local_debug_file = Path.cwd() / "debug_trace.log"
+            debug_handler = logging.FileHandler(local_debug_file, encoding="utf-8")
+            debug_handler.setFormatter(formatter)
+            debug_handler.addFilter(_filter)
+            self.logger.addHandler(debug_handler)
+        except Exception:
+            sys.stderr.write("Failed to create debug_trace.log in local dir\n")
+
         # ── Also configure child loggers for the RAG package ──────────────
         # By default, RAG module loggers propagate to the root logger, which
         # may have its own handler that ALSO lacks the filter.  Redirect them

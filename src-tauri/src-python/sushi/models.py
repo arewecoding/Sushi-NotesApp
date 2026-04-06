@@ -126,6 +126,58 @@ class RenameDirectoryRequest(PyTauriModel):
     new_name: str
 
 
+class CreateCanvasFileRequest(PyTauriModel):
+    title: str = "Untitled Canvas"
+    directory: str
+
+
+class OpenCanvasFileRequest(PyTauriModel):
+    path: str
+
+
+class SaveCanvasFileRequest(PyTauriModel):
+    file_id: str
+    path: str
+    canvas_data: Dict[str, Any]
+
+
+class DeleteCanvasFileRequest(PyTauriModel):
+    file_id: str
+    path: str
+
+
+class RenameCanvasFileRequest(PyTauriModel):
+    """Rename a canvas or book file (preserving original extension)."""
+
+    file_id: str
+    old_path: str
+    new_name: str  # filename stem only — extension is preserved automatically
+
+
+class GetResourcePathRequest(PyTauriModel):
+    note_id: str
+    filename: str
+    block_id: Optional[str] = None
+    block_data: Optional[Dict[str, Any]] = None
+
+
+class SaveCanvasBlockRequest(PyTauriModel):
+    """Save an embedded canvas block inside a note."""
+
+    note_id: str
+    block_id: str
+    canvas_ref: str           # e.g. "abc123.jcanvas" — stored in .sushi-resources/
+    canvas_data: Dict[str, Any]
+    thumbnail_data_url: Optional[str] = None   # Optional: base64 PNG data URL from the frontend thumbnail
+
+
+class LoadCanvasBlockRequest(PyTauriModel):
+    """Load an embedded canvas block's stored data."""
+
+    note_id: str
+    canvas_ref: str           # e.g. "abc123.jcanvas"
+
+
 # ==========================================
 # Response Models (Backend → Frontend)
 # ==========================================
@@ -159,11 +211,21 @@ class DirectoryItem(PyTauriModel):
     dir_name: str
 
 
+class CanvasFileItem(PyTauriModel):
+    """A canvas file (.jcanvas or .jbook) in the file tree."""
+
+    file_id: str
+    title: str
+    file_type: str  # 'jcanvas' or 'jbook'
+    file_path: str  # Absolute path to file
+
+
 class DirectoryContents(PyTauriModel):
-    """Contents of a directory — subdirs and notes."""
+    """Contents of a directory — subdirs, notes, and canvas files."""
 
     subdirs: List[DirectoryItem]
     notes: List[NoteListItem]
+    canvas_files: List[CanvasFileItem] = []
 
 
 # ==========================================
@@ -281,3 +343,105 @@ class SearchResponse(PyTauriModel):
     """Search results returned to the frontend."""
 
     results: List[SearchResultItem]
+
+
+# ==========================================
+# Settings Request / Response Models
+# ==========================================
+
+
+class AppSettings(PyTauriModel):
+    """Full application settings returned to the frontend."""
+
+    vault_path: str
+    google_api_key: str  # masked: "•••••key" or empty
+    google_api_key_set: bool
+    embedding_model: str
+    llm_model: str
+    auto_save_delay: float  # seconds
+    rag_enabled: bool
+    faiss_vectors: int
+    graph_nodes: int
+    graph_edges: int
+
+
+class SaveSettingsRequest(PyTauriModel):
+    """Settings update from the frontend."""
+
+    vault_path: Optional[str] = None
+    google_api_key: Optional[str] = None  # None = don't change
+    embedding_model: Optional[str] = None
+    llm_model: Optional[str] = None
+    auto_save_delay: Optional[float] = None
+
+
+class SaveSettingsResponse(PyTauriModel):
+    """Result of saving settings."""
+
+    success: bool
+    message: str = ""
+    restart_required: bool = False
+
+
+# ==========================================
+# Error Code Constants
+# ==========================================
+
+CANVAS_NOT_FOUND = "CANVAS_NOT_FOUND"
+SAVE_FAILED = "SAVE_FAILED"
+LOAD_FAILED = "LOAD_FAILED"
+INVALID_PAYLOAD = "INVALID_PAYLOAD"
+RESOURCE_MISSING = "RESOURCE_MISSING"
+ENGINE_ERROR = "ENGINE_ERROR"
+NOTE_NOT_FOUND = "NOTE_NOT_FOUND"
+
+
+# ==========================================
+# Standardized Response Envelopes
+# ==========================================
+
+
+class OkResponse(BaseModel):
+    """Envelope for successful IPC responses."""
+
+    status: str = "ok"
+    data: Any = None
+
+
+class ErrorResponse(BaseModel):
+    """Envelope for failed IPC responses."""
+
+    status: str = "error"
+    code: str
+    message: str
+    detail: Optional[Any] = None
+
+
+def ok(data: Any = None) -> dict:
+    """Return a standardized success envelope dict."""
+    return OkResponse(data=data).model_dump()
+
+
+def err(code: str, message: str, detail: Any = None) -> dict:
+    """Return a standardized error envelope dict."""
+    return ErrorResponse(code=code, message=message, detail=detail).model_dump()
+
+
+# ==========================================
+# Client Error Logging Payload
+# ==========================================
+
+
+class LogErrorPayload(PyTauriModel):
+    """Payload for errors reported by the frontend or WASM engine."""
+
+    source: str        # "rust_wasm" | "svelte"
+    message: str
+    stack: Optional[str] = None
+    timestamp: Optional[str] = None
+
+class FrontendLogPayload(PyTauriModel):
+    """Payload for frontend console logs piped to the backend."""
+    level: str         # "log" | "warn" | "error" | "debug" | "info"
+    message: str
+    timestamp: float

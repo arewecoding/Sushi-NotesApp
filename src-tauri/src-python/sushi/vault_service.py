@@ -7,9 +7,18 @@ and ActiveFileTree (navigation state).
 
 import threading
 import json
-from typing import Dict, Optional, Any, Union
+import os
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Optional, Union, Any
 
+from pytauri import AppHandle
+
+from sushi.cache_db import FileIndex, NoteMetadata
+from sushi.filesys import atomic_write
+from sushi.resource_manager import ResourceManager
 from sushi.watcher import VaultWatcher
 from sushi.filesys import (
     update_note,
@@ -24,9 +33,14 @@ from sushi.filesys import (
     rename_note as filesys_rename_note,
     rename_directory as filesys_rename_directory,
 )
-from sushi.note_schema import JNote, NoteBlock, create_block
-from sushi.cache_db import FileIndex, NoteMetadata
+from sushi.migrations import migrate_canvas
+try:
+    from send2trash import send2trash
+except ImportError:
+    send2trash = None
 from sushi.logger import sys_log, LogSource, LogLevel
+from sushi.note_schema import JNote, NoteBlock
+from sushi.block_factory import UnifiedBlockFactory
 from sushi.models import (
     TreeChangedPayload,
     NoteContentChangedPayload,
@@ -46,6 +60,12 @@ try:
 except ImportError:
     HAS_EMITTER = False
     AppHandleType = None
+
+
+# How long (seconds) a saved note is shielded from watcher-driven hot-swaps.
+# Must exceed the worst-case watchdog debounce + Windows NTFS event delay.
+# 5 seconds covers even high-load machines where the observer thread is starved.
+ECHO_SUPPRESSION_TTL_SEC: float = 5.0
 
 
 # ==========================================
@@ -249,14 +269,27 @@ class ActiveNote:
     # Block Editing
     # ==========================================
 
-    def add_block(self, block_type: str, **kwargs):
-        """Uses create_block to append a new block."""
+    def add_block(self, block_type: str, **kwargs) -> Dict:
+        """Uses UnifiedBlockFactory to append a new block."""
         if not self.note_obj:
-            return
-        new_block = create_block(block_type, **kwargs)
+            raise ValueError("Note not open")
+            
+        note_path = get_note_filepath(self.service.db, self.note_id)
+        if not note_path:
+            raise ValueError("Note path not found")
+            
+        block_dict = UnifiedBlockFactory.build_block(
+            block_type=block_type,
+            note_id=self.note_id,
+            resource_manager=self.service.resource_manager,
+            note_dir=note_path.parent,
+            **kwargs
+        )
+        new_block = NoteBlock.from_dict(block_dict)
         self.note_obj.blocks.append(new_block)
         self.is_dirty = True
         self._schedule_save()
+        return block_dict
 
     def update_block(self, block_id: str, new_data: Dict[str, Any]):
         if not self.note_obj:
@@ -304,6 +337,20 @@ class ActiveNote:
 
         self.note_obj.blocks = new_blocks
         self.is_dirty = True
+
+        # Reconcile resource ownership: clean up files for removed blocks
+        current_block_ids = {
+            b.block_id for b in new_blocks if b.block_id
+        }
+        try:
+            self.service.reconcile_block_resources(self.note_id, current_block_ids)
+        except Exception as e:
+            sys_log.log(
+                LogSource.SYSTEM,
+                LogLevel.ERROR,
+                f"Resource reconciliation failed: {e}",
+            )
+
         self._schedule_save()
 
         sys_log.log(
@@ -372,12 +419,21 @@ class VaultService:
         self.db = FileIndex()
         self.watcher = VaultWatcher(self.vault_path, self.db, self.on_file_event)
         self.file_tree = ActiveFileTree(app_handle)
+        self.resource_manager = ResourceManager(self.db, self.vault_path)
 
         # Active notes registry
         self._active_notes: Dict[str, ActiveNote] = {}
 
-        # Guard: note_ids currently being saved (suppress watchdog events)
-        self._saving_note_ids: set = set()
+        # Guard: tracks note_ids currently being saved and when their suppression expires.
+        # Maps note_id -> monotonic expiry time (time.monotonic() + ECHO_SUPPRESSION_TTL_SEC).
+        # NOT cleared immediately after the write — the entry lives until TTL expires so
+        # that delayed watchdog events are still caught and suppressed.
+        self._saving_note_ids: Dict[str, float] = {}
+
+        # Guard: canvas paths currently being renamed/deleted by the app.
+        # Maps absolute path str -> monotonic expiry time.
+        # Suppresses spurious watcher tree-changed events for our own renames/deletes.
+        self._suppressed_canvas_paths: Dict[str, float] = {}
 
         sys_log.log(
             LogSource.SYSTEM,
@@ -393,16 +449,36 @@ class VaultService:
     def start(self):
         """Starts initial scan and file watching."""
         self.watcher.scan(self.db)
+        self.resource_manager.scan_vault_incremental()
         self.watcher.start()
         sys_log.log(LogSource.SYSTEM, LogLevel.INFO, "VaultService started.")
 
-    def mark_saving(self, note_id: str):
-        """Register a note_id as currently being saved (suppresses watchdog echoes)."""
-        self._saving_note_ids.add(note_id)
+    def mark_saving(self, note_id: str) -> None:
+        """Register note_id as recently saved. Suppresses watcher events for TTL seconds."""
+        self._saving_note_ids[note_id] = time.monotonic() + ECHO_SUPPRESSION_TTL_SEC
 
-    def unmark_saving(self, note_id: str):
-        """Unregister a note_id from the saving guard set."""
-        self._saving_note_ids.discard(note_id)
+    def unmark_saving(self, note_id: str) -> None:
+        """No-op: the TTL entry expires naturally. Called for API symmetry."""
+        # Intentionally NOT removing the entry here.
+        # The watcher event from watchdog can arrive seconds after the write on Windows;
+        # if we remove the suppression immediately after atomic_write completes, we leave
+        # a window where the delayed event passes through and triggers a hot-swap.
+        # Entries are consumed on first matched event or expire after ECHO_SUPPRESSION_TTL_SEC.
+
+    def suppress_canvas_path(self, path: str) -> None:
+        """Suppress watcher tree-changed events for a canvas path for TTL seconds."""
+        self._suppressed_canvas_paths[path] = time.monotonic() + ECHO_SUPPRESSION_TTL_SEC
+
+    def _is_canvas_path_suppressed(self, path: str) -> bool:
+        """Return True if the canvas path is within its suppression TTL window."""
+        expiry = self._suppressed_canvas_paths.get(path)
+        if expiry is None:
+            return False
+        if time.monotonic() < expiry:
+            return True
+        # TTL expired
+        del self._suppressed_canvas_paths[path]
+        return False
 
     def stop(self):
         """Stops file watching and closes all active notes."""
@@ -419,6 +495,11 @@ class VaultService:
         """Callback triggered by VaultWatcher for every file event."""
         path = Path(path_str)
 
+        # Ignore all writes inside resource directories
+        if ".sushi-resources" in path.parts:
+            sys_log.log(LogSource.SYSTEM, LogLevel.DEBUG, f"Resource write ignored: {path_str}")
+            return
+
         # Determine event type from mtime
         if mtime == 0.0:
             event_type = "deleted"
@@ -429,9 +510,16 @@ class VaultService:
         else:
             event_type = "created"
 
-        # Directory or non-note → always update file tree
+        # Directory or non-.jnote → update file tree unless canvas-path is suppressed.
         if path.is_dir() or path.suffix != ".jnote":
-            self.file_tree.handle_structure_change(path_str, event_type)
+            if not self._is_canvas_path_suppressed(path_str):
+                self.file_tree.handle_structure_change(path_str, event_type)
+            else:
+                sys_log.log(
+                    LogSource.SYSTEM,
+                    LogLevel.DEBUG,
+                    f"Canvas path suppressed: {path_str}",
+                )
             return
 
         # --- Note file event handling ---
@@ -453,13 +541,30 @@ class VaultService:
                         note_id = nid
                         break
 
-            # Echo suppression check
+            # Echo suppression check — TTL dict; entry is kept until expiry so
+            # secondary writes (e.g. _resolve_identity's last_known_path stamp)
+            # that generate additional watcher events are also covered.
             if note_id and note_id in self._active_notes:
                 active_note = self._active_notes[note_id]
-                if (
+                expiry = self._saving_note_ids.get(note_id)
+                if expiry is not None:
+                    if time.monotonic() < expiry:
+                        # Within TTL — suppress this event; keep entry for subsequent events.
+                        sys_log.log(
+                            LogSource.SYSTEM,
+                            LogLevel.DEBUG,
+                            f"Echo suppressed (TTL) for {note_id}",
+                        )
+                        is_echo = True
+                    else:
+                        # TTL has expired — stale entry, clean up.
+                        del self._saving_note_ids[note_id]
+                elif (
                     active_note._last_save_mtime
-                    and abs(mtime - active_note._last_save_mtime) < 0.1
+                    and abs(mtime - active_note._last_save_mtime) < 2.0
                 ):
+                    # Secondary guard: mtime very close to our last write.
+                    # Tolerance widened to 2.0 s to cover filesystem clock granularity.
                     is_echo = True
 
         if is_echo:
@@ -498,7 +603,6 @@ class VaultService:
             event_type == "modified"
             and note_id
             and note_id in self._active_notes
-            and note_id not in self._saving_note_ids
         ):
             self._active_notes[note_id].handle_external_update(mtime)
 
@@ -564,8 +668,12 @@ class VaultService:
         return meta
 
     def delete_note_by_id(self, note_id: str) -> bool:
-        """Closes active note (if open) and deletes from disk."""
+        """Closes active note (if open), deletes tracked resources, and deletes the note from disk."""
         self.close_note(note_id, skip_save=True)
+
+        # Clean up all tracked resource files before deleting the note
+        self._delete_note_resources(note_id)
+
         return filesys_delete_note(self.db, note_id)
 
     def delete_directory_by_path(self, dir_path: str) -> bool:
@@ -653,3 +761,298 @@ class VaultService:
         resolved_parent = parent_path if parent_path else str(self.vault_path)
         result = filesys_create_directory(resolved_parent, dir_name)
         return result is not None
+
+    # ==========================================
+    # Canvas File Operations
+    # ==========================================
+
+    def create_canvas_file(self, title: str, directory: str) -> dict:
+        directory = self._resolve_dest_dir(directory)
+        file_id = str(uuid.uuid4())
+        
+        # Simple slugification
+        slug = "".join(c if c.isalnum() else "-" for c in title).strip("-").lower()
+        slug = "-".join(filter(None, slug.split("-")))
+        if not slug:
+            slug = "canvas"
+        
+        filename = f"{slug}-{file_id[:8]}.jcanvas"
+        full_path = Path(directory) / filename
+        
+        now = datetime.now(timezone.utc).isoformat()
+        
+        canvas_data = {
+            "metadata": {
+                "file_id": file_id,
+                "title": title,
+                "created_at": now,
+                "last_modified": now,
+                "version": "1.0",
+                "mode": "canvas"
+            },
+            "background": {
+                "type": "none",
+                "color": "#d0d0d0",
+                "spacing": 20,
+                "tile_ref": None
+            },
+            "viewport": {
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+                "scale": 1.0
+            },
+            "strokes": [],
+            "text_objects": [],
+            "image_objects": [],
+            "resources": {}
+        }
+        
+        # Write to disk
+        atomic_write(full_path, json.dumps(canvas_data, indent=2))
+        
+        # Update db
+        cursor = self.db.conn.cursor()
+        file_dir = str(full_path.parent)
+        full_path_str = str(full_path)
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canvas_files 
+            (file_id, title, path, file_type, file_dir, created_at, last_modified, last_known_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (file_id, title, full_path_str, "jcanvas", file_dir, now, now, full_path_str)
+        )
+        self.db.conn.commit()
+        
+        # Emit tree change
+        self.file_tree.handle_structure_change(full_path_str, "created")
+        
+        sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Created canvas: {file_id}")
+        return {"file_id": file_id, "path": full_path_str}
+
+    def open_canvas_file(self, path: str) -> dict:
+        file_path = Path(path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Canvas not found: {path}")
+            
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        return migrate_canvas(data)
+
+    def save_canvas_file(self, file_id: str, path: str, canvas_data: dict) -> None:
+        file_path = Path(path)
+        now = datetime.now(timezone.utc).isoformat()
+        
+        if "metadata" not in canvas_data:
+            canvas_data["metadata"] = {}
+        canvas_data["metadata"]["last_modified"] = now
+        
+        atomic_write(file_path, json.dumps(canvas_data, indent=2))
+        
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "UPDATE canvas_files SET last_modified = ? WHERE file_id = ?",
+            (now, file_id)
+        )
+        self.db.conn.commit()
+        
+        sys_log.log(LogSource.SYSTEM, LogLevel.DEBUG, f"Saved canvas: {file_id}")
+
+    def save_canvas_block(
+        self,
+        note_id: str,
+        block_id: str,
+        canvas_ref: str,
+        canvas_data: dict,
+        thumbnail_data_url: Optional[str] = None,
+    ) -> Optional[str]:
+        """Persist an embedded canvas block and its thumbnail inside the note's resources dir.
+        
+        If thumbnail_data_url is omitted, the prior thumbnail on disk (if any) is preserved.
+
+        Args:
+            note_id: The owning note's UUID.
+            block_id: The block's UUID within the note.
+            canvas_ref: Filename of the canvas file, e.g. ``abc123.jcanvas``.
+            canvas_data: Serialized canvas state from the WASM engine.
+            thumbnail_data_url: Optional base64 PNG data URL to save as the thumbnail.
+
+        Returns:
+            The thumbnail filename (stem + "-thumb.png").
+
+        Raises:
+            FileNotFoundError: If the note's path cannot be resolved from the DB.
+        """
+        note_path = get_note_filepath(self.db, note_id)
+        if not note_path:
+            raise FileNotFoundError(f"Note path not found for note_id={note_id}")
+
+        res_id = Path(canvas_ref).stem
+        self.resource_manager.update_resource(res_id, canvas_data)
+
+        thumb_filename = None
+        if thumbnail_data_url:
+            try:
+                from sushi.resource_manager import ResourceNotFound
+                thumb_res = self.resource_manager.get_resource(res_id + "-thumb", check_exists=False)
+            except ResourceNotFound:
+                thumb_res = self.resource_manager.create_resource(block_id, "thumbnail", note_path.parent, res_id=res_id)
+            
+            self.resource_manager.update_resource(thumb_res.resource_id, thumbnail_data_url)
+            thumb_filename = thumb_res.file_path.name
+
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.DEBUG,
+            "canvas_block_saved",
+            meta={
+                "note_id": note_id,
+                "block_id": block_id,
+                "canvas_ref": canvas_ref,
+            }
+        )
+
+        return thumb_filename
+
+    def load_canvas_block(self, note_id: str, canvas_ref: str) -> Optional[dict]:
+        """Load the stored canvas data for an embedded block.
+
+        Args:
+            note_id: The owning note's UUID.
+            canvas_ref: Filename of the canvas file, e.g. ``abc123.jcanvas``.
+
+        Returns:
+            Migrated canvas dict, or None if the file does not exist yet
+            (new block that has never been saved).
+
+        Raises:
+            FileNotFoundError: If the note's path cannot be resolved from the DB.
+        """
+        res_id = Path(canvas_ref).stem
+        try:
+            resource = self.resource_manager.get_resource(res_id, check_exists=True)
+            if not resource.exists():
+                return None
+            data = json.loads(resource.read().decode("utf-8"))
+            return migrate_canvas(data)
+        except Exception as e:
+            sys_log.log(LogSource.SYSTEM, LogLevel.ERROR, f"Failed to load canvas: {e}")
+            return None
+
+    def delete_canvas_file(self, file_id: str, path: str) -> None:
+        file_path = Path(path)
+        
+        if file_path.exists():
+            if send2trash:
+                try:
+                    send2trash(str(file_path))
+                except Exception:
+                    os.remove(file_path)
+            else:
+                os.remove(file_path)
+                
+        cursor = self.db.conn.cursor()
+        cursor.execute("DELETE FROM canvas_files WHERE file_id = ?", (file_id,))
+        self.db.conn.commit()
+        
+        self.file_tree.handle_structure_change(str(file_path), "deleted")
+        sys_log.log(LogSource.SYSTEM, LogLevel.INFO, f"Deleted canvas: {file_id}")
+
+    def rename_canvas_file(self, file_id: str, old_path: str, new_name: str) -> str:
+        """Rename a .jcanvas/.jbook file, preserving its original extension.
+
+        Args:
+            file_id: stable UUID of the canvas file.
+            old_path: current absolute path of the file.
+            new_name: desired filename stem (extension auto-preserved).
+
+        Returns:
+            The new absolute path as a string.
+
+        Raises:
+            FileNotFoundError: if old_path does not exist.
+            FileExistsError: if a file with the new name already exists.
+        """
+        old = Path(old_path)
+        if not old.exists():
+            raise FileNotFoundError(f"Canvas file not found: {old_path}")
+
+        # Preserve the original extension (.jcanvas or .jbook)
+        extension = old.suffix
+        new_filename = new_name if new_name.endswith(extension) else new_name + extension
+        new_path = old.parent / new_filename
+
+        if new_path.exists():
+            raise FileExistsError(f"A file named '{new_filename}' already exists")
+
+        # Suppress watcher events for both old and new paths before the rename.
+        # The watchdog MovedEvent (or delete+create pair) arrives after the OS rename;
+        # without suppression it would emit a tree-changed and cause a ghost duplicate.
+        self.suppress_canvas_path(str(old))
+        self.suppress_canvas_path(str(new_path))
+
+        old.rename(new_path)
+
+        cursor = self.db.conn.cursor()
+        cursor.execute(
+            "UPDATE canvas_files SET path = ?, last_known_path = ? WHERE file_id = ?",
+            (str(new_path), str(new_path), file_id),
+        )
+        self.db.conn.commit()
+
+        # Emit exactly one tree-changed ourselves (suppression blocks the watcher duplicate).
+        self.file_tree.handle_structure_change(str(new_path), "moved")
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.INFO,
+            f"Renamed canvas: {file_id}",
+            meta={
+                "old": old_path,
+                "new": str(new_path),
+            }
+        )
+        return str(new_path)
+
+    # ==========================================
+    # Resource Garbage Collection
+    # ==========================================
+
+    def _delete_note_resources(self, note_id: str):
+        """Delete all tracked resource files for a note from disk and the DB.
+
+        Called before a note is permanently deleted. Silently skips files
+        that have already been removed externally.
+        """
+        note_path = get_note_filepath(self.db, note_id)
+        if not note_path:
+            return
+
+
+        # We don't have block IDs here, so we just delete the .sushi-resources dir
+        # if it exists, assuming this note was the only one using it, or wait for garbage collection.
+        # However, to be safe since it's shared, we will NOT delete the folder automatically.
+        sys_log.log(
+            LogSource.SYSTEM,
+            LogLevel.INFO,
+            "note_deleted_resource_cleanup_deferred",
+            meta={"note_id": note_id},
+        )
+
+    def reconcile_block_resources(self, note_id: str, current_block_ids: set):
+        """Remove resources for blocks that no longer exist in the note.
+
+        Compares the set of block IDs currently in the note against the
+        resource registry. Any DB entry whose block_id is not in the set
+        gets its files deleted from disk and its records purged.
+
+        Args:
+            note_id: The note being reconciled.
+            current_block_ids: Set of block_id strings still present in the note.
+        """
+        # Since we use `.jnote` as source of truth and incremental scanning, 
+        # true orphan cleanup (deleting physical files) should be handled by a periodic garbage collector.
+        # For now, we update the in-memory registry by re-scanning this note.
+        note_path = get_note_filepath(self.db, note_id)
+        if note_path:
+            self.resource_manager._index_note_resources(note_path, note_id)

@@ -60,3 +60,5 @@ sample_notes/
 
 # Sushi app log
 .sushi/
+
+Canvas/canvas-engine/pkg/

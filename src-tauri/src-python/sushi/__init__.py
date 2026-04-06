@@ -4,33 +4,59 @@ Sushi Notes App — PyTauri Backend
 Application entry point and lifecycle management.
 """
 
-import os
-from pathlib import Path
+# -- Structlog and flags must be configured before any other sushi imports --
+from sushi.logging_config import configure_logging
+configure_logging()
 
-from anyio.from_thread import start_blocking_portal
-from pytauri import AppHandle, Manager, Emitter, builder_factory, context_factory
+from sushi.flags import load_flags, write_default_flags  # noqa: E402
+load_flags()
+write_default_flags()
 
-from sushi.commands import commands  # Commands container + all handler registrations
-from sushi.vault_service import VaultService
-from sushi.rag_service import RAGService
-from sushi.logger import sys_log, LogSource, LogLevel
-from sushi.models import VaultReadyPayload
+import json  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from anyio.from_thread import start_blocking_portal  # noqa: E402
+from pytauri import AppHandle, Manager, Emitter, builder_factory, context_factory  # noqa: E402
+
+from sushi.commands import commands  # noqa: E402
+from sushi.vault_service import VaultService  # noqa: E402
+from sushi.rag_service import RAGService  # noqa: E402
+from sushi.logger import sys_log, LogSource, LogLevel  # noqa: E402
+from sushi.models import VaultReadyPayload  # noqa: E402
 
 
 # ==========================================
 # Configuration
 # ==========================================
 
-# Vault path: configurable via environment variable, with dev default
-VAULT_PATH = Path(
-    os.environ.get(
-        "SUSHI_VAULT_PATH",
-        "C:/Users/ADMIN/Development/PyTauri/test project/test_1/sushi/sample_notes/",
-    )
-)
 
 # Config dir: the directory containing rag_config.json and rag_hyperparams.json.
 # Resolves to src-tauri/ at dev time (where the pyproject.toml lives) and to
+# the bundle root in production.
+_CONFIG_DIR = Path(__file__).parent.parent.parent
+
+# Resolve vault path: first check sushi_settings.json, then env var, then default
+_settings_file = _CONFIG_DIR / "sushi_settings.json"
+_vault_path_str = ""
+
+if _settings_file.exists():
+    try:
+        with open(_settings_file, "r", encoding="utf-8") as f:
+            _settings = json.load(f)
+            _vault_path_str = _settings.get("vault_path", "")
+    except Exception:
+        pass
+
+if not _vault_path_str:
+    _vault_path_str = os.environ.get(
+        "SUSHI_VAULT_PATH",
+        "C:/Users/ADMIN/Development/PyTauri/test project/test_1/sushi/sample_notes/",
+    )
+
+VAULT_PATH = Path(
+    _vault_path_str
+)  # Resolves to src-tauri/ at dev time (where the pyproject.toml lives) and to
 # the bundle root in production.
 _CONFIG_DIR = Path(__file__).parent.parent.parent
 

@@ -13,4 +13,5 @@ export const isSearchOpen = writable(false);
 export const leftPanelWidth = writable(256);
 export const rightPanelWidth = writable(300);
 export const rightPanelTab = writable<'details' | 'chat'>('chat');
+export const activeMainTab = writable<'notes' | 'canvas'>('notes');
 

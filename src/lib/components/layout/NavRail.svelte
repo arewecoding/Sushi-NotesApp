@@ -8,12 +8,15 @@
    */
   import {
     FileText,
+    Pencil,
     Calendar,
     Network,
     Settings,
     LayoutGrid,
   } from "lucide-svelte";
+  import { activeMainTab } from "$lib/stores/layoutStore";
   import { activeNoteId, activeNoteContent } from "$lib/stores/notesStore";
+  import { openSettings } from "$lib/stores/settingsStore";
 
   function goHome() {
     $activeNoteId = null;
@@ -40,12 +43,23 @@
   </div>
 
   <!-- Nav Items -->
-  <button
-    class="p-2 text-neutral-100 bg-neutral-800 rounded-md hover:bg-neutral-700 transition-colors"
-    title="Notes"
-  >
-    <FileText size={20} />
-  </button>
+  <div class="flex flex-col gap-2">
+    <button
+      class="p-2 {$activeMainTab === 'notes' ? 'text-neutral-100 bg-neutral-800' : 'text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800'} rounded-md transition-colors cursor-pointer"
+      title="Notes"
+      onclick={() => ($activeMainTab = 'notes')}
+    >
+      <FileText size={20} />
+    </button>
+    
+    <button
+      class="p-2 {$activeMainTab === 'canvas' ? 'text-neutral-100 bg-neutral-800' : 'text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800'} rounded-md transition-colors cursor-pointer"
+      title="Canvas"
+      onclick={() => ($activeMainTab = 'canvas')}
+    >
+      <Pencil size={20} />
+    </button>
+  </div>
 
   <button
     class="p-2 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded-md transition-colors"
@@ -73,6 +87,7 @@
   <button
     class="p-2 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded-md transition-colors"
     title="Settings"
+    onclick={openSettings}
   >
     <Settings size={20} />
   </button>
